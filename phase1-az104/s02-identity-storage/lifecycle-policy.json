@@ -8,7 +8,7 @@
               "daysAfterCreationGreaterThan": null,
               "daysAfterLastAccessTimeGreaterThan": null,
               "daysAfterLastTierChangeGreaterThan": null,
-              "daysAfterModificationGreaterThan": 90.0
+              "daysAfterModificationGreaterThan": 2557.0
             },
             "enableAutoTierToHotFromCool": null,
             "tierToArchive": null,
@@ -16,7 +16,7 @@
               "daysAfterCreationGreaterThan": null,
               "daysAfterLastAccessTimeGreaterThan": null,
               "daysAfterLastTierChangeGreaterThan": null,
-              "daysAfterModificationGreaterThan": 2557.0
+              "daysAfterModificationGreaterThan": 90.0
             },
             "tierToCool": {
               "daysAfterCreationGreaterThan": null,

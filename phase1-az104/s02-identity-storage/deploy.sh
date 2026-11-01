@@ -25,10 +25,7 @@ az storage account create --name "$SA" --resource-group "$RG" --location "$LOC" 
   --sku Standard_ZRS --kind StorageV2 --access-tier Hot \
   --min-tls-version TLS1_2 --allow-blob-public-access false \
   --tags env=lab week=s02 -o none
-EOF
 
-chmod +x deploy.sh
-ls -l deploy.sh
 
 # --- 5. Role assignment : group Auditors → Lab Blob Reader → storage account ---
 SA_ID=$(az storage account show --name "$SA" --resource-group "$RG" --query id -o tsv)
