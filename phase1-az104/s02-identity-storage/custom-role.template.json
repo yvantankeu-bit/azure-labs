@@ -1,0 +1,17 @@
+{
+  "Name": "Lab Blob Reader (s02)",
+  "Description": "Read storage accounts, containers and blobs. No access keys.",
+  "Actions": [
+    "Microsoft.Storage/storageAccounts/read",
+    "Microsoft.Storage/storageAccounts/blobServices/containers/read",
+    "Microsoft.Resources/subscriptions/resourceGroups/read"
+  ],
+  "NotActions": [],
+  "DataActions": [
+    "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read"
+  ],
+  "NotDataActions": [],
+  "AssignableScopes": [
+    "$SCOPE"
+  ]
+}

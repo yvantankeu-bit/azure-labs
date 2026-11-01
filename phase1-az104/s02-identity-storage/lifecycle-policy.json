@@ -1,0 +1,47 @@
+{
+  "rules": [
+    {
+      "definition": {
+        "actions": {
+          "baseBlob": {
+            "delete": {
+              "daysAfterCreationGreaterThan": null,
+              "daysAfterLastAccessTimeGreaterThan": null,
+              "daysAfterLastTierChangeGreaterThan": null,
+              "daysAfterModificationGreaterThan": 90.0
+            },
+            "enableAutoTierToHotFromCool": null,
+            "tierToArchive": null,
+            "tierToCold": {
+              "daysAfterCreationGreaterThan": null,
+              "daysAfterLastAccessTimeGreaterThan": null,
+              "daysAfterLastTierChangeGreaterThan": null,
+              "daysAfterModificationGreaterThan": 2557.0
+            },
+            "tierToCool": {
+              "daysAfterCreationGreaterThan": null,
+              "daysAfterLastAccessTimeGreaterThan": null,
+              "daysAfterLastTierChangeGreaterThan": null,
+              "daysAfterModificationGreaterThan": 30.0
+            },
+            "tierToHot": null
+          },
+          "snapshot": null,
+          "version": null
+        },
+        "filters": {
+          "blobIndexMatch": null,
+          "blobTypes": [
+            "blockBlob"
+          ],
+          "prefixMatch": [
+            "docs/"
+          ]
+        }
+      },
+      "enabled": true,
+      "name": "audit-reports-retention",
+      "type": "Lifecycle"
+    }
+  ]
+}
