@@ -53,3 +53,20 @@ az storage account management-policy create --account-name "$SA" --resource-grou
 # az storage blob generate-sas --account-name "$SA" --container-name docs --name rapport.txt \
 #   --permissions r --expiry "$EXPIRY" --auth-mode login --as-user -o tsv
 # Nécessite generateUserDelegationKey (inclus dans les Storage Blob Data roles, pas dans Lab Blob Reader)
+
+# --- 10. Private endpoint (blob) + Private DNS zone + VNet link + zone group ---
+az network vnet create --name vnet-lab-s02 --resource-group "$RG" --location "$LOC" \
+  --address-prefixes 10.20.0.0/16 --subnet-name snet-pe --subnet-prefixes 10.20.1.0/24 \
+  --tags env=lab week=s02 -o none
+az network private-endpoint create --name pe-stlab-blob --resource-group "$RG" --location "$LOC" \
+  --vnet-name vnet-lab-s02 --subnet snet-pe --private-connection-resource-id "$SA_ID" \
+  --group-id blob --connection-name pe-conn-blob --tags env=lab week=s02 -o none
+az network private-dns zone create --name privatelink.blob.core.windows.net --resource-group "$RG" -o none
+az network private-dns link vnet create --name link-vnet-lab-s02 --resource-group "$RG" \
+  --zone-name privatelink.blob.core.windows.net --virtual-network vnet-lab-s02 \
+  --registration-enabled false -o none
+az network private-endpoint dns-zone-group create --resource-group "$RG" --endpoint-name pe-stlab-blob \
+  --name default --private-dns-zone privatelink.blob.core.windows.net --zone-name blob -o none
+
+# --- 11. Fermer la porte publique (EN DERNIER : coupe aussi notre accès data plane depuis Internet) ---
+az storage account update --name "$SA" --resource-group "$RG" --public-network-access Disabled -o none
