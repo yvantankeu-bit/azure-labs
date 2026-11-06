@@ -70,3 +70,18 @@ az network private-endpoint dns-zone-group create --resource-group "$RG" --endpo
 
 # --- 11. Fermer la porte publique (EN DERNIER : coupe aussi notre accès data plane depuis Internet) ---
 az storage account update --name "$SA" --resource-group "$RG" --public-network-access Disabled -o none
+
+# --- 12. Azure Policy (built-ins, Deny) au scope du RG ---
+# Assignées en dernier : Deny ne joue qu'à la création/modification ; l'existant devient "non-compliant"
+RG_ID=$(az group show --name "$RG" --query id -o tsv)
+az policy assignment create --name pa-allowed-locations --display-name "S02 - Allowed locations (Canada)" \
+  --policy e56962a6-4747-49cd-b67b-bf8b01975c4c --scope "$RG_ID" \
+  --params '{"listOfAllowedLocations":{"value":["canadacentral","canadaeast"]}}' -o none
+az policy assignment create --name pa-require-tag-env --display-name "S02 - Require tag env" \
+  --policy 871b6d14-10aa-478d-b590-94f262ecfa99 --scope "$RG_ID" \
+  --params '{"tagName":{"value":"env"}}' -o none
+
+# --- 13. Lock CanNotDelete sur le storage account (à retirer AVANT az group delete) ---
+az lock create --name lock-stlab-nodelete --lock-type CanNotDelete \
+  --resource-group "$RG" --resource "$SA" --resource-type Microsoft.Storage/storageAccounts \
+  --notes "Lab S02: protect audit reports account from accidental deletion" -o none

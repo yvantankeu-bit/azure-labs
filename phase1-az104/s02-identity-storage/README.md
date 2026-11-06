@@ -22,6 +22,8 @@ A company stores audit reports in Azure. Requirements:
 | 6 | Reports are kept **7 years**, at the lowest reasonable cost | Lifecycle management policy |
 | 7 | An external auditor can get **temporary, read-only** access to one file | User delegation SAS |
 | 8 | Data is reachable **from the private network only** | Private endpoint + Private DNS zone, public network access disabled |
+| 9 | Resources stay **in Canada** and are **tagged** by environment | Azure Policy (built-in definitions, `Deny` effect) assigned to the resource group |
+| 10 | The storage account cannot be **deleted by mistake**, even by an Owner | `CanNotDelete` resource lock |
 
 ---
 
@@ -43,6 +45,8 @@ flowchart LR
         DNS["Private DNS zone<br/>privatelink.blob.core.windows.net<br/>A record → 10.20.1.4"]
     end
 
+    POL["Azure Policy (Deny)<br/>Allowed locations<br/>Require tag env"] -. "assigned to RG" .-> RG
+    LOCK["Lock CanNotDelete"] -. protects .-> SA
     G -->|"Lab Blob Reader (custom role)<br/>scope: storage account"| SA
     PE --> SA
     DNS -. VNet link .- VNET
@@ -110,6 +114,28 @@ Blob and container soft delete, 7 days. Protects against deletes **and overwrite
 
 ![Private DNS zone privatelink.blob.core.windows.net with 2 record sets and 1 VNet link](images/private-dns-zone.png)
 
+### 8. Azure Policy – built-in definitions only
+Two built-in policy definitions, assigned at the **resource group** scope, effect `Deny`:
+
+| Policy definition | Parameter | Effect |
+|---|---|---|
+| Allowed locations | `canadacentral`, `canadaeast` | Deny |
+| Require a tag on resources | `tagName = env` | Deny |
+
+- **Why built-in:** they already cover the need; a custom definition would only add maintenance. Custom definitions come later (Policy-as-Code, week 56).
+- **Assigned last:** `Deny` is evaluated on **create and update** requests only. Resources created before the assignment are reported as **non-compliant**, never deleted or modified. In return, any later *update* of an untagged resource is denied until it gets the tag.
+- **Global resources:** the Private DNS zone has location `global`; the built-in *Allowed locations* definition excludes `global`, so it is not blocked.
+- **Scope of the tag policy:** *Require a tag on resources* does not apply to resource groups (a separate built-in exists for that).
+- **Policy vs RBAC:** RBAC answers *who* can act; Policy answers *what* a resource may look like, **whoever** creates it (an Owner is denied too).
+- **Next step (not done here):** `Modify` effect with a managed identity + remediation task to add the missing tag automatically (planned in weeks 27/56).
+
+### 9. Resource lock – `lock-stlab-nodelete`
+- `CanNotDelete` on the storage account: read and modify still work, **delete** fails with `ScopeLocked`, even for an Owner.
+- Complements soft delete: soft delete protects **blobs and containers**, the lock protects **the account itself**.
+- A lock is inherited by child scopes and **blocks the deletion of the resource group** too, so it must be removed first at cleanup.
+- Removing a lock requires `Microsoft.Authorization/locks/delete` (Owner or User Access Administrator): it is a speed bump against mistakes, not a security boundary against an admin.
+- **Why not `ReadOnly`:** it would also block POST operations such as `listKeys` and some data-plane management calls, which breaks legitimate tools.
+
 ---
 
 ## Tests and results
@@ -130,12 +156,19 @@ Blob and container soft delete, 7 days. Protects against deletes **and overwrite
 | Anonymous request after public access disabled | `curl` | 403 before blob existence check (would be 404 otherwise) | ✅ 403 |
 | My own identity after public access disabled | `--auth-mode login` | Blocked by network rules | ✅ |
 | Control plane after public access disabled | `az storage account show` | Works | ✅ |
+| Create an NSG in `eastus` (with tag) | Policy *Allowed locations* | Denied | ✅ `RequestDisallowedByPolicy` |
+| Create an NSG in `canadacentral` without `env` tag | Policy *Require a tag* | Denied | ✅ `RequestDisallowedByPolicy` |
+| Create an NSG in `eastus` without tag | Both policies | Denied, **both** assignments listed | ✅ 2 assignments cited in the error |
+| Delete the storage account | Owner, lock in place | Denied | ✅ `ScopeLocked` |
+| Update tags on the storage account | Owner, lock in place | Success | ✅ (`CanNotDelete` allows modifications) |
 
 ---
 
 ## Lessons learned
 
 - **Authentication vs authorization:** `AuthenticationFailed` (who are you? invalid proof) vs `AuthorizationPermissionMismatch` / `AuthorizationFailed` (you are known but not allowed).
+- **Policy reports all violations at once:** one request breaking two assignments lists both, which saves trial-and-error.
+- **Governance layers are independent:** RBAC (who), Policy (what), lock (can it be deleted), soft delete (can the data come back). Each one covers a gap the others leave.
 - **Network layer before identity layer:** with public access disabled, a valid SAS is never even evaluated from the Internet.
 - **`NotActions` is not a deny:** RBAC is additive; another role can grant the excluded action back.
 - **Always read what was actually saved:** the portal-created lifecycle rule initially had `delete` and `tierToCold` swapped (delete after 90 days instead of 7 years). Caught by reading the JSON, fixed in Azure and in Git.
@@ -156,8 +189,13 @@ source vars.sh
 
 ## Cleanup
 
+Order matters: the lock blocks the resource group deletion.
+
 ```bash
-az group delete --name "$RG" --yes          # storage, VNet, private endpoint, DNS zone
+az lock delete --name lock-stlab-nodelete --resource-group "$RG" \
+  --resource "$SA" --resource-type Microsoft.Storage/storageAccounts
+az group delete --name "$RG" --yes          # storage, VNet, private endpoint, DNS zone,
+                                            # policy and role assignments at RG scope or below
 az role definition delete --name "Lab Blob Reader (s02)"
 az ad group delete --group "Auditors-s02"   # Entra ID objects are NOT in the resource group
 ```
