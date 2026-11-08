@@ -22,6 +22,8 @@ A company stores audit reports in Azure. Requirements:
 | 6 | Reports are kept **7 years**, at the lowest reasonable cost | Lifecycle management policy |
 | 7 | An external auditor can get **temporary, read-only** access to one file | User delegation SAS |
 | 8 | Data is reachable **from the private network only** | Private endpoint + Private DNS zone, public network access disabled |
+| 9 | Everything stays **in Canada**, every resource is **tagged** | Azure Policy (built-in definitions assigned to the resource group) |
+| 10 | The storage account cannot be **deleted by mistake** | Resource lock `CanNotDelete` |
 
 ---
 
@@ -110,6 +112,24 @@ Blob and container soft delete, 7 days. Protects against deletes **and overwrite
 
 ![Private DNS zone privatelink.blob.core.windows.net with 2 record sets and 1 VNet link](images/private-dns-zone.png)
 
+### 8. Azure Policy – built-in definitions, assigned to the resource group
+No custom policy definition: two **built-ins** are assigned at the resource group scope with parameters.
+
+| Assignment | Built-in definition | Parameters | Effect |
+|---|---|---|---|
+| `S02 - Allowed locations (Canada only)` | Allowed locations (`e56962a6-4747-49cd-b67b-bf8b01975c4c`) | `listOfAllowedLocations` = `canadacentral`, `canadaeast` | `Deny` (the effect is itself a parameter) |
+| `S02 - Require tag env on resources` | Require a tag on resources (`871b6d14-10aa-478d-b590-94f262ecfa99`) | `tagName` = `env` | `deny` (hard-coded in the definition) |
+
+- **RBAC vs Policy:** RBAC decides *who* may perform an action; Policy decides whether the *resource* is compliant. Policy applies to everyone, **Owner included**.
+- **Audit before Deny** in production: Deny does not delete existing non-compliant resources, but it blocks any **update** to them (the whole resource is re-evaluated, including its location). An effect exposed as a parameter lets the same assignment move from `Audit` to `Deny` by changing one value.
+- Built-in GUIDs are identical in every tenant, which makes them safe to reference in scripts and IaC.
+- Not covered here: `Modify` / `DeployIfNotExists` with remediation tasks (they require a managed identity on the assignment).
+
+### 9. Resource lock – `CanNotDelete` on the storage account
+- `CanNotDelete` rather than `ReadOnly`: teams still change settings (tags, lifecycle rules). `ReadOnly` would block every write, including `listKeys` (a POST action), which breaks key-based clients.
+- Locks protect the **control plane** only: deleting the account is blocked, deleting **blobs** is not (that is what soft delete is for).
+- Locks are inherited downwards; a lock on any child resource blocks deleting its resource group. Removing a lock requires `Microsoft.Authorization/locks/*` (Owner, User Access Administrator), not Contributor.
+
 ---
 
 ## Tests and results
@@ -130,6 +150,21 @@ Blob and container soft delete, 7 days. Protects against deletes **and overwrite
 | Anonymous request after public access disabled | `curl` | 403 before blob existence check (would be 404 otherwise) | ✅ 403 |
 | My own identity after public access disabled | `--auth-mode login` | Blocked by network rules | ✅ |
 | Control plane after public access disabled | `az storage account show` | Works | ✅ |
+| Create NSG in East US (with tag), as Owner | Policy | Denied | ✅ RequestDisallowedByPolicy (Allowed locations) |
+| Create NSG in Canada Central (with tag) | Policy | Created | ✅ |
+| Create NSG in Canada Central without tag | Policy | Denied | ✅ RequestDisallowedByPolicy (Require tag) |
+| Create NSG in East US without tag | Policy | Denied by both | ✅ Both assignments listed in one error |
+| Delete the locked storage account, as Owner | Lock | Denied | ✅ ScopeLocked |
+| Update tags on the locked storage account | Lock | Works | ✅ |
+
+**Which layer blocked me?** The error code tells you where to look:
+
+| Error code | Layer | First thing to check |
+|---|---|---|
+| `AuthorizationFailed` / `AuthorizationPermissionMismatch` | RBAC | Role (control vs data plane) and scope |
+| `RequestDisallowedByPolicy` | Azure Policy | The assignment named in the message, and its parameters |
+| `ScopeLocked` | Resource lock | The locked scope named in the message (resource or parent) |
+| `AuthenticationFailed` | Authentication | Identity or SAS signature is invalid |
 
 ---
 
@@ -137,7 +172,8 @@ Blob and container soft delete, 7 days. Protects against deletes **and overwrite
 
 - **Authentication vs authorization:** `AuthenticationFailed` (who are you? invalid proof) vs `AuthorizationPermissionMismatch` / `AuthorizationFailed` (you are known but not allowed).
 - **Network layer before identity layer:** with public access disabled, a valid SAS is never even evaluated from the Internet.
-- **`NotActions` is not a deny:** RBAC is additive; another role can grant the excluded action back.
+- **`NotActions` is not a deny:** RBAC is additive; another role can grant the excluded action back. To really prevent a delete, use a resource lock (and fix the over-privileged role).
+- **Three independent layers:** an operation must pass RBAC, Azure Policy and resource locks. Being Owner only satisfies the first one.
 - **Always read what was actually saved:** the portal-created lifecycle rule initially had `delete` and `tierToCold` swapped (delete after 90 days instead of 7 years). Caught by reading the JSON, fixed in Azure and in Git.
 - **Variable interpolation:** bash expands `$VAR` on the command line and in unquoted heredocs, never inside a file read by another program (`@file.json`). Hence the template + `envsubst`.
 - **WSL + Windows Azure CLI:** the Windows `az` binary returned CRLF line endings that corrupted variables; fixed by installing the native Linux CLI (`which az` → `/usr/bin/az`). `cat -A` is the go-to tool to spot invisible characters.
@@ -157,7 +193,9 @@ source vars.sh
 ## Cleanup
 
 ```bash
-az group delete --name "$RG" --yes          # storage, VNet, private endpoint, DNS zone
+az lock delete --name lock-stlab-nodelete --resource-group "$RG" \
+  --resource "$SA" --resource-type Microsoft.Storage/storageAccounts   # the lock blocks the RG delete
+az group delete --name "$RG" --yes          # storage, VNet, DNS zone, policy and role assignments in the RG
 az role definition delete --name "Lab Blob Reader (s02)"
 az ad group delete --group "Auditors-s02"   # Entra ID objects are NOT in the resource group
 ```
