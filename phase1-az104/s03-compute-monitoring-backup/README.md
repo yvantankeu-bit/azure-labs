@@ -8,7 +8,7 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 | Lab | Topic | Status |
 |---|---|---|
 | 1 | Zonal VMs behind a zone-redundant Load Balancer, zone failure test | ✅ Built and tested |
-| 2 | VM Scale Set across 3 zones with autoscale | To do |
+| 2 | VM Scale Set across 3 zones with autoscale | In progress |
 | 3 | App Service with a staging slot | To do |
 | 4 | Containers: ACR + ACI | To do |
 | 5 | Monitoring: Log Analytics, KQL, alerts | To do |
@@ -23,6 +23,10 @@ A small web application must keep answering if one availability zone of Canada C
 
 ### Architecture
 
+![Lab 1 architecture: zone-redundant public IP and Load Balancer in front of vm1 (zone 1) and vm2 (zone 2)](images/lab1-architecture.png)
+
+<details><summary>Same diagram as Mermaid source</summary>
+
 ```mermaid
 flowchart TB
     U["User (Internet)"] --> PIP["Public IP pip-lb-s03<br/>Standard, zone-redundant (1, 2, 3)"]
@@ -36,6 +40,8 @@ flowchart TB
     LB --> VM1
     LB --> VM2
 ```
+
+</details>
 
 Built with [`deploy.sh`](./deploy.sh). nginx is installed at first boot by [`cloud-init.yaml`](./cloud-init.yaml); each VM serves a page with its hostname and the zone it reads from the Instance Metadata Service (IMDS).
 
@@ -99,3 +105,23 @@ The key question is: **does the VM have to move to another host?**
 az group delete --name "$RG" --yes
 az group exists --name "$RG"   # expected: false
 ```
+
+---
+
+## Lab 2 – VM Scale Set (Flexible) across 3 zones with autoscale
+
+### Scenario
+Same web application, but instances are no longer created one by one: a scale set creates them from one model, spreads them across zones and adjusts their number to the load.
+
+### Architecture
+
+![Lab 2 architecture: zone-redundant Load Balancer in front of a Flexible VMSS spread across zones 1-3, with CPU-based autoscale between 2 and 4 instances](images/lab2-architecture.png)
+
+### Design decisions
+- **Flexible orchestration:** instances are standard Azure VMs (manageable individually), recommended by Microsoft for new deployments.
+- **One model, one count:** size, image, cloud-init, subnet and backend pool are defined once; the scale set creates NICs, disks and VMs and registers them in the pool.
+- **Minimum 2 instances:** with 1 instance in a single zone, a zone failure means a full outage until a new instance is provisioned (minutes). Two instances in different zones keep the ~10 s failover seen in lab 1.
+- **Scale-out +1 if CPU > 70 % for 5 min, scale-in −1 if CPU < 30 %:** the gap between thresholds prevents **flapping** (removing an instance raises the CPU of the remaining ones; with 69 %/70 %, 3 × 60 % would become 2 × 90 % and trigger a scale-out again).
+- **Cooldown:** after each action, autoscale waits before evaluating again, because a new instance only takes traffic once provisioning, cloud-init and the health probe have succeeded.
+
+*Build, tests and results: in progress.*
