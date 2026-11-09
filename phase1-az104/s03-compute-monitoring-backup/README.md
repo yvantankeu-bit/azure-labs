@@ -8,7 +8,7 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 | Lab | Topic | Status |
 |---|---|---|
 | 1 | Zonal VMs behind a zone-redundant Load Balancer, zone failure test | ✅ Built and tested |
-| 2 | VM Scale Set across 3 zones with autoscale | In progress |
+| 2 | VM Scale Set across 3 zones with autoscale | ✅ Built and tested |
 | 3 | App Service with a staging slot | To do |
 | 4 | Containers: ACR + ACI | To do |
 | 5 | Monitoring: Log Analytics, KQL, alerts | To do |
@@ -124,4 +124,55 @@ Same web application, but instances are no longer created one by one: a scale se
 - **Scale-out +1 if CPU > 70 % for 5 min, scale-in −1 if CPU < 30 %:** the gap between thresholds prevents **flapping** (removing an instance raises the CPU of the remaining ones; with 69 %/70 %, 3 × 60 % would become 2 × 90 % and trigger a scale-out again).
 - **Cooldown:** after each action, autoscale waits before evaluating again, because a new instance only takes traffic once provisioning, cloud-init and the health probe have succeeded.
 
-*Build, tests and results: in progress.*
+### Build
+Same base as lab 1 (VNet, NSG, zone-redundant public IP, Load Balancer with probe, rule and outbound rule), then:
+
+```bash
+az vmss create --name vmss-web --resource-group "$RG" --location "$LOC" \
+  --orchestration-mode Flexible --zones 1 2 3 --platform-fault-domain-count 1 \
+  --vm-sku Standard_B1s --image Ubuntu2404 --instance-count 2 \
+  --vnet-name vnet-lab-s03 --subnet snet-web \
+  --lb lb-web-s03 --backend-pool-name bp-web \
+  --storage-sku StandardSSD_LRS --admin-username azureuser --generate-ssh-keys \
+  --custom-data cloud-init.yaml --tags env=lab week=s03 -o none
+
+az monitor autoscale create --name autoscale-web --resource-group "$RG" \
+  --resource vmss-web --resource-type Microsoft.Compute/virtualMachineScaleSets \
+  --min-count 2 --max-count 4 --count 2 -o none
+az monitor autoscale rule create --autoscale-name autoscale-web --resource-group "$RG" \
+  --condition "Percentage CPU > 70 avg 5m" --scale out 1 --cooldown 5 -o none
+az monitor autoscale rule create --autoscale-name autoscale-web --resource-group "$RG" \
+  --condition "Percentage CPU < 30 avg 5m" --scale in 1 --cooldown 5 -o none
+```
+
+CPU load was generated with Run Command on each instance: `nohup timeout 900 yes > /dev/null 2>&1 &` (stopped early with `pkill yes`).
+
+### Tests and results
+
+| Time (local) | Event | Observation |
+|---|---|---|
+| 11:41 | VMSS created, 2 instances | Zone balancing placed them in zones 1 and 2 automatically, both registered in the backend pool |
+| 11:44 | Traffic test | Both instances answer (hash-based, uneven on a small sample) |
+| 11:58 | CPU load started on both instances | `Percentage CPU` (VMSS average): 0.4 % → 94 % within 2 minutes |
+| 12:05 | **Scale-out 2 → 3** | New instance in **zone 3**, serving traffic ~2 minutes later (cloud-init + probe), no manual step |
+| 12:10 | **Unexpected scale-out 3 → 4** | Fourth instance in zone 1 (max reached) – see lessons learned |
+| 12:11 | Load stopped (`pkill yes`) | |
+| 12:16 | **Scale-in 4 → 3** | The removed instance came from zone 1 (the only zone with 2), restoring 1 instance per zone |
+| next | Scale-in 3 → 2 expected after the 5-minute cooldown, then stop at the minimum | |
+
+**Scale-out** – a third instance appears in zone 3, then a fourth in zone 1:
+
+![Scale-out: third instance in zone 3](images/lab2-scale-out.png)
+
+**Scale-in** – one instance of zone 1 is removed, one instance per zone remains:
+
+![Scale-in from 4 to 3 instances](images/lab2-scale-in.png)
+
+### Lessons learned
+- **The prediction "3 instances → average 67 %, no fourth instance" was right on paper and wrong in practice.** A new instance only reports CPU metrics after it has booted. During its first minutes, the VMSS average was computed on the 2 loaded instances only (≈ 100 %), so when the cooldown ended at 12:10 the scale-out rule fired again. Mitigations: a longer cooldown than the instance warm-up time, or a predictive/scheduled profile for known peaks.
+- **The latest metric minute is incomplete** (15:59 read 0.35 %, then 32 % a minute later). Autoscale and humans should not react to the last data point.
+- **Minimum and maximum always win over rules:** CPU at 0.4 % before the test did not scale in below 2; at 4 instances, no further scale-out was possible.
+- **Zone balancing works both ways:** new instances go to the emptiest zone, removed instances come from the fullest zone.
+- **Two different names per instance:** the Azure resource name (`vmss-web_<id>`, used by CLI/portal) and the Linux computer name (`vmss-web<random>`, returned by `hostname`).
+- **Burstable sizes and sustained load:** a B1s runs on CPU credits; a constant load beyond the credits would be throttled to its baseline. Fine for this test, wrong for a production workload with steady CPU.
+- **Before trusting a hypothesis, measure it:** an uneven distribution looked like an nginx failure; the `DipAvailability` metric showed both instances healthy (it was the hash).
