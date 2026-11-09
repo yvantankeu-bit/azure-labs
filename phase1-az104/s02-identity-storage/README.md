@@ -29,6 +29,10 @@ A company stores audit reports in Azure. Requirements:
 
 ## Architecture
 
+![S02 architecture: Entra ID group with custom role on a ZRS storage account, private endpoint and Private DNS zone, public access disabled, Azure Policy and lock](images/architecture.png)
+
+<details><summary>Same diagram as Mermaid source</summary>
+
 ```mermaid
 flowchart LR
     subgraph Entra["Microsoft Entra ID"]
@@ -50,6 +54,8 @@ flowchart LR
     DNS -. VNet link .- VNET
     Internet((Internet)) -. "public network access: Disabled" .-x SA
 ```
+
+</details>
 
 ---
 
