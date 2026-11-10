@@ -9,7 +9,7 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 |---|---|---|
 | 1 | Zonal VMs behind a zone-redundant Load Balancer, zone failure test | ✅ Built and tested |
 | 2 | VM Scale Set across 3 zones with autoscale | ✅ Built and tested |
-| 3 | App Service with a staging slot | To do |
+| 3 | App Service with a staging slot | In progress |
 | 4 | Containers: ACR + ACI | To do |
 | 5 | Monitoring: Log Analytics, KQL, alerts | To do |
 | 6 | Backup and restore of a VM | To do |
@@ -176,3 +176,24 @@ CPU load was generated with Run Command on each instance: `nohup timeout 900 yes
 - **Two different names per instance:** the Azure resource name (`vmss-web_<id>`, used by CLI/portal) and the Linux computer name (`vmss-web<random>`, returned by `hostname`).
 - **Burstable sizes and sustained load:** a B1s runs on CPU credits; a constant load beyond the credits would be throttled to its baseline. Fine for this test, wrong for a production workload with steady CPU.
 - **Before trusting a hypothesis, measure it:** an uneven distribution looked like an nginx failure; the `DipAvailability` metric showed both instances healthy (it was the hash).
+
+---
+
+## Lab 3 – App Service: deploy to a staging slot and swap
+
+### Scenario
+Version 1 of an application runs in production. Version 2 is deployed to a **staging slot**, tested at its own URL, then promoted to production with a **swap**, without downtime. The test also checks that a **slot setting** (the database connection) stays with its slot while the code moves.
+
+### Architecture
+
+![Lab 3 architecture: App Service plan Standard S1 hosting a Web App with a production slot (v1, production database) and a staging slot (v2, test database), swapped while DB_CONNECTION stays with each slot](images/lab3-architecture.png)
+
+### Design decisions
+- **PaaS instead of IaaS:** no OS, web server, Load Balancer or health probe to manage; the platform provides them.
+- **Plan vs app:** the App Service plan is the set of servers (paid for); every app on a plan runs on every instance of the plan. Apps with different load profiles or criticality go on **separate plans** to avoid the **noisy neighbor** effect ("same plan, same servers, same fate").
+- **Standard tier (S1):** deployment slots require Standard or higher.
+- **Swap instead of redeploying production:** the staging slot is warmed up before the swap, so users never hit a cold start; rolling back is another swap.
+- **Slot settings for environment values:** anything that describes the environment (database, keys, service URLs) is a slot setting; anything that describes the application version follows the code. A forgotten slot setting is a **silent** failure: production would connect to the test database with no error at all.
+
+*Build, tests and results: in progress.*
+
