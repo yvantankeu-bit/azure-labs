@@ -9,7 +9,7 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 |---|---|---|
 | 1 | Zonal VMs behind a zone-redundant Load Balancer, zone failure test | ✅ Built and tested |
 | 2 | VM Scale Set across 3 zones with autoscale | ✅ Built and tested |
-| 3 | App Service with a staging slot | To do |
+| 3 | App Service with a staging slot | ✅ Built and tested |
 | 4 | Containers: ACR + ACI | To do |
 | 5 | Monitoring: Log Analytics, KQL, alerts | To do |
 | 6 | Backup and restore of a VM | To do |
@@ -176,3 +176,80 @@ CPU load was generated with Run Command on each instance: `nohup timeout 900 yes
 - **Two different names per instance:** the Azure resource name (`vmss-web_<id>`, used by CLI/portal) and the Linux computer name (`vmss-web<random>`, returned by `hostname`).
 - **Burstable sizes and sustained load:** a B1s runs on CPU credits; a constant load beyond the credits would be throttled to its baseline. Fine for this test, wrong for a production workload with steady CPU.
 - **Before trusting a hypothesis, measure it:** an uneven distribution looked like an nginx failure; the `DipAvailability` metric showed both instances healthy (it was the hash).
+
+---
+
+## Lab 3 – App Service: deploy to a staging slot and swap
+
+### Scenario
+Version 1 of an application runs in production. Version 2 is deployed to a **staging slot**, tested at its own URL, then promoted to production with a **swap**, without downtime. The test also checks that a **slot setting** (the database connection) stays with its slot while the code moves.
+
+### Architecture
+
+![Lab 3 architecture: App Service plan Standard S1 hosting a Web App with a production slot (v1, production database) and a staging slot (v2, test database), swapped while DB_CONNECTION stays with each slot](images/lab3-architecture.png)
+
+### Design decisions
+- **PaaS instead of IaaS:** no OS, web server, Load Balancer or health probe to manage; the platform provides them.
+- **Plan vs app:** the App Service plan is the set of servers (paid for); every app on a plan runs on every instance of the plan. Apps with different load profiles or criticality go on **separate plans** to avoid the **noisy neighbor** effect ("same plan, same servers, same fate").
+- **Standard tier (S1):** deployment slots require Standard or higher.
+- **Swap instead of redeploying production:** the staging slot is warmed up before the swap, so users never hit a cold start; rolling back is another swap.
+- **Slot settings for environment values:** anything that describes the environment (database, keys, service URLs) is a slot setting; anything that describes the application version follows the code. A forgotten slot setting is a **silent** failure: production would connect to the test database with no error at all.
+
+### Build
+The Web App name must be globally unique (it becomes `<app>.azurewebsites.net`), so it gets a random suffix kept in the local `vars.sh` (`APP=app-lab-s03-<random>`).
+
+```bash
+az appservice plan create --name asp-lab-s03 --resource-group "$RG" --location canadaeast \
+  --sku S1 --is-linux --tags env=lab week=s03 -o none
+az webapp create --name "$APP" --resource-group "$RG" --plan asp-lab-s03 \
+  --runtime "PHP:8.3" --tags env=lab week=s03 -o none
+az webapp config appsettings set --name "$APP" --resource-group "$RG" --settings APP_VERSION=v1 -o none
+az webapp config appsettings set --name "$APP" --resource-group "$RG" --slot-settings DB_CONNECTION=prod-db -o none
+az webapp deploy --name "$APP" --resource-group "$RG" --src-path index.php --type static --target-path index.php -o none
+
+az webapp deployment slot create --name "$APP" --resource-group "$RG" --slot staging --configuration-source "$APP" -o none
+az webapp config appsettings set --name "$APP" --resource-group "$RG" --slot staging --settings APP_VERSION=v2 -o none
+az webapp config appsettings set --name "$APP" --resource-group "$RG" --slot staging --slot-settings DB_CONNECTION=test-db -o none
+sed -i 's/\$code = "v1"/$code = "v2"/' index.php
+az webapp deploy --name "$APP" --resource-group "$RG" --slot staging --src-path index.php --type static --target-path index.php -o none
+
+az webapp deployment slot swap --name "$APP" --resource-group "$RG" --slot staging --target-slot production
+```
+
+[`index.php`](./index.php) prints the code version (hard-coded in the file) and the two app settings read with `getenv()`. No real database is involved: `DB_CONNECTION` only holds a name, which is enough to see what moves and what stays.
+
+> **Quota blocker:** in `canadacentral`, the subscription had a quota of **0** for both S1 and P0v3 App Service instances (`Operation cannot be completed without additional quota`). Quotas are per region: the same S1 plan was accepted in **`canadaeast`**. A plan can live in a different region than its resource group (the RG location only stores metadata). The long-term fix is a quota increase request (Help + support → Service and subscription limits).
+
+### Tests and results
+
+| Test | Expected | Result |
+|---|---|---|
+| Production after first deployment | v1 / v1 / prod-db | ✅ |
+| Deploying v2 to staging | Production untouched | ✅ No restart, still v1 |
+| Before swap | prod v1 / v1 / prod-db – staging v2 / v2 / test-db | ✅ |
+| **Swap** (production observed every second) | No empty answer; code and `APP_VERSION` move, `DB_CONNECTION` stays | ✅ v2 / v2 / **prod-db**, zero failed request |
+| During the last seconds of the swap | | One `v1` answer after 10 s of `v2`, then v2 only (routing change propagating to the front ends) |
+| Staging after swap | v1 / v1 / test-db | ✅ (first request slow: staging restarts cold, warm-up only protects production) |
+| **Rollback** (second swap) | v1 / v1 / prod-db | ✅ |
+
+**Before the swap** – each slot with its own code and settings:
+
+![Before swap: production v1 with prod-db, staging v2 with test-db](images/lab3-before-swap.png)
+
+**During and after the swap** – production observed every second: v2 with `prod-db`, no empty line:
+
+![After swap: production serves v2 with prod-db](images/lab3-after-swap.png)
+
+**Rollback** – one more swap brings v1 back to production, still with `prod-db`:
+
+![Rollback: production back to v1 with prod-db](images/lab3-rollback.png)
+
+### Lessons learned
+- **Slot settings stay, everything else follows the code.** The image that made it click: slot settings are the name plates screwed on each office door; the code and normal settings are the team that changes offices.
+- **A forgotten slot setting fails silently** (production on the test database, no error). Environment values must be slot settings.
+- **Changing app settings restarts the app** (they are injected as environment variables at process start). Deployment took ~1 minute to restart the site, which is exactly what the swap warm-up hides from users.
+- **v1 and v2 can serve at the same time for a few seconds** at the end of a swap: new versions must stay compatible with the old one (e.g. add a database column, do not drop it in the same release).
+- **Rollback is a swap**, not a redeployment: the previous version is still running in staging.
+- **Read the first error only:** the quota error caused two `ResourceNotFound` errors after it. Chaining commands with `&&` stops at the first failure.
+- **Runtimes have an end-of-support date** (`az webapp list-runtimes`): PaaS removes OS work but not version planning (PHP 8.2 ends on 2026-12-31).
+
