@@ -10,7 +10,7 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 | 1 | Zonal VMs behind a zone-redundant Load Balancer, zone failure test | ✅ Built and tested |
 | 2 | VM Scale Set across 3 zones with autoscale | ✅ Built and tested |
 | 3 | App Service with a staging slot | ✅ Built and tested |
-| 4 | Containers: ACR + ACI | To do |
+| 4 | Containers: ACR + ACI | In progress |
 | 5 | Monitoring: Log Analytics, KQL, alerts | To do |
 | 6 | Backup and restore of a VM | To do |
 
@@ -252,4 +252,24 @@ az webapp deployment slot swap --name "$APP" --resource-group "$RG" --slot stagi
 - **Rollback is a swap**, not a redeployment: the previous version is still running in staging.
 - **Read the first error only:** the quota error caused two `ResourceNotFound` errors after it. Chaining commands with `&&` stops at the first failure.
 - **Runtimes have an end-of-support date** (`az webapp list-runtimes`): PaaS removes OS work but not version planning (PHP 8.2 ends on 2026-12-31).
+
+---
+
+## Lab 4 – Containers: build in ACR, run in ACI with a managed identity
+
+### Scenario
+The PHP page is packaged as a container image. ACR builds and stores the image (no Docker needed on the workstation), then ACI runs it without any server to manage, pulling the image from the private registry with a **managed identity** – no password anywhere.
+
+### Architecture
+
+![Lab 4 architecture: az acr build sends the Dockerfile to ACR, which builds monapp:v1; ACI pulls it using a managed identity with the AcrPull role, and users reach the container through a public IP and DNS name label](images/lab4-architecture.png)
+
+### Design decisions
+- **Image vs container:** the image is read-only; each container gets its own writable layer. Changing the application means building a new image, never editing a running container.
+- **Containers are ephemeral:** a restart recreates the container from the image, so data that must survive goes outside (database, storage account, or an Azure Files volume mounted in ACI).
+- **ACR Tasks (`az acr build`)** builds the image in Azure from the Dockerfile, so the workstation does not need Docker.
+- **Pull with a managed identity + `AcrPull`, not the admin user:** the admin user is one shared secret for the whole registry that also allows push; a managed identity has no secret to store or rotate, gets read-only access, and is traceable (same reasoning as Entra ID auth vs access keys in S02).
+- **ACI for a quick, serverless run:** per-second billing, no VM or plan; but no autoscale, load balancing or slots, so production apps belong on App Service, Container Apps or AKS (compared in S18).
+
+*Build, tests and results: in progress.*
 
