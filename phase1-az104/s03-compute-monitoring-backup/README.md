@@ -10,7 +10,7 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 | 1 | Zonal VMs behind a zone-redundant Load Balancer, zone failure test | ✅ Built and tested |
 | 2 | VM Scale Set across 3 zones with autoscale | ✅ Built and tested |
 | 3 | App Service with a staging slot | ✅ Built and tested |
-| 4 | Containers: ACR + ACI | In progress |
+| 4 | Containers: ACR + ACI | ✅ Built and tested |
 | 5 | Monitoring: Log Analytics, KQL, alerts | To do |
 | 6 | Backup and restore of a VM | To do |
 
@@ -271,5 +271,48 @@ The PHP page is packaged as a container image. ACR builds and stores the image (
 - **Pull with a managed identity + `AcrPull`, not the admin user:** the admin user is one shared secret for the whole registry that also allows push; a managed identity has no secret to store or rotate, gets read-only access, and is traceable (same reasoning as Entra ID auth vs access keys in S02).
 - **ACI for a quick, serverless run:** per-second billing, no VM or plan; but no autoscale, load balancing or slots, so production apps belong on App Service, Container Apps or AKS (compared in S18).
 
-*Build, tests and results: in progress.*
+### Build
+Image recipe in [`lab4-container/`](./lab4-container) ([`Dockerfile`](./lab4-container/Dockerfile) based on `php:8.3-apache` + [`index.php`](./lab4-container/index.php)).
+
+```bash
+az group create --name "$RG4" --location "$LOC" --tags env=lab week=s03 -o none
+az acr create --name "$ACR" --resource-group "$RG4" --location "$LOC" --sku Basic -o none
+az acr build --registry "$ACR" --image monapp:v1 lab4-container   # ACR Tasks builds the image in Azure
+
+# User-assigned managed identity with AcrPull on the registry only
+az identity create --name id-aci-pull --resource-group "$RG4" --location "$LOC" -o none
+ID_ID=$(az identity show --name id-aci-pull --resource-group "$RG4" --query id -o tsv)
+ID_PRINCIPAL=$(az identity show --name id-aci-pull --resource-group "$RG4" --query principalId -o tsv)
+ACR_ID=$(az acr show --name "$ACR" --query id -o tsv)
+az role assignment create --assignee-object-id "$ID_PRINCIPAL" --assignee-principal-type ServicePrincipal \
+  --role AcrPull --scope "$ACR_ID" -o none
+
+az container create --name aci-monapp --resource-group "$RG4" --location "$LOC" \
+  --image "$ACR.azurecr.io/monapp:v1" --assign-identity "$ID_ID" --acr-identity "$ID_ID" \
+  --os-type Linux --cpu 1 --memory 1.5 --ports 80 \
+  --ip-address Public --dns-name-label "monapp-$RANDOM" --restart-policy Always -o none
+```
+
+**Why a user-assigned identity:** ACI pulls the image while the container group is being created. A system-assigned identity would only exist at that moment, without the `AcrPull` role yet. A user-assigned identity is created and authorized *before* the container group.
+
+### Tests and results
+
+| Test | Expected | Result |
+|---|---|---|
+| `az acr build` | Image `monapp:v1` in the registry | ✅ Build + push in 38 s; digest recorded, base image `php:8.3-apache` listed as runtime dependency |
+| Role assignment | `AcrPull` on the registry scope | ✅ |
+| ACI from the private registry, no password | `Running`, page answers | ✅ `Hello from container SandboxHost-... - code v1` |
+| Change the page **inside** the running container (`az container exec`) | Page shows the change | ✅ `code v1-modifie` |
+| `az container restart` | Container recreated from the read-only image, change lost | ✅ back to `code v1` |
+
+**Ephemeral container:** the page is modified inside the container, then lost after a restart:
+
+![Container modified with az container exec, then restarted: the change is gone](images/lab4-ephemeral.png)
+
+### Lessons learned
+- **Tag vs digest:** a tag (`v1`) is a movable label; the digest (`sha256:...`) is the immutable fingerprint of the content. Pin the digest when the exact image matters.
+- **The image is the source of truth:** a change made inside a running container lives in its writable layer and disappears on restart. Changing the application means building a new image.
+- **No secret anywhere:** the pull uses a managed identity with a read-only role scoped to one registry (same principle as Entra ID auth instead of access keys in S02).
+- **ACI runs each container group in an isolated sandbox** (the hostname is `SandboxHost-...`, not a VM of mine).
+- **`az container exec` cannot pass arguments** to the command: open `/bin/bash`, then type the commands inside.
 
