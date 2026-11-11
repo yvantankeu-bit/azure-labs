@@ -11,7 +11,7 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 | 2 | VM Scale Set across 3 zones with autoscale | ✅ Built and tested |
 | 3 | App Service with a staging slot | ✅ Built and tested |
 | 4 | Containers: ACR + ACI | ✅ Built and tested |
-| 5 | Monitoring: Log Analytics, KQL, alerts | To do |
+| 5 | Monitoring: Log Analytics, KQL, alerts | In progress |
 | 6 | Backup and restore of a VM | To do |
 
 ---
@@ -315,4 +315,23 @@ az container create --name aci-monapp --resource-group "$RG4" --location "$LOC" 
 - **No secret anywhere:** the pull uses a managed identity with a read-only role scoped to one registry (same principle as Entra ID auth instead of access keys in S02).
 - **ACI runs each container group in an isolated sandbox** (the hostname is `SandboxHost-...`, not a VM of mine).
 - **`az container exec` cannot pass arguments** to the command: open `/bin/bash`, then type the commands inside.
+
+---
+
+## Lab 5 – Monitoring: Log Analytics, KQL and alerts
+
+### Scenario
+A small Linux VM is monitored end to end: its guest data and the subscription activity log land in a Log Analytics workspace queried with KQL, and two alerts send an email – one on high CPU, one on any deletion in the resource group.
+
+### Architecture
+
+![Lab 5 architecture: a Linux VM with the Azure Monitor Agent sends Perf and Syslog data through a Data Collection Rule to a Log Analytics workspace, the activity log is exported with a diagnostic setting, and a metric alert and an activity log alert notify an action group by email](images/lab5-architecture.png)
+
+### Design decisions
+- **Metrics vs logs:** metrics answer "how much" (numeric time series, automatic, near real time); logs answer "what happened and why" (records with details, stored in a workspace, queried with KQL, billed per GB ingested).
+- **Three log sources:** the **activity log** (control plane: who created, changed or deleted what) is automatic and free for 90 days; **resource logs** (inside a resource) are **not collected by default** and need a **diagnostic setting**, which is **not retroactive**; **guest OS data** of a VM needs the **Azure Monitor Agent** and a **Data Collection Rule**, because Azure only sees a VM from the host.
+- **A deletion is a control plane operation**, so the deletion alert is an **activity log alert** (no workspace needed, free), not a resource log alert.
+- **Action group** defined once and reused by both alerts.
+
+*Build, tests and results: in progress.*
 
