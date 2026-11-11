@@ -392,6 +392,10 @@ DCR template: [`dcr.template.json`](./dcr.template.json) (performance counters C
 
 ![alert-cpu-high and alert-nsg-delete in Fired state](images/lab5-alerts-fired.png)
 
+**Why the CPU alert fired** – the alert detail shows the metric crossing the 80 % threshold (88.69 % when it fired):
+
+![alert-cpu-high detail: average Percentage CPU above the 80 % threshold](images/lab5-cpu-alert-detail.png)
+
 ### Lessons learned
 - **Diagnostic settings are not retroactive:** resource logs that were not collected are lost. Configure them at creation time (in production, enforce with Azure Policy `DeployIfNotExists`).
 - **The activity log diagnostic setting lives at subscription level** and survives the resource group deletion: remove it explicitly at cleanup.
