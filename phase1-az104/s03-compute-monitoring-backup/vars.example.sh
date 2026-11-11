@@ -6,3 +6,5 @@ APP="app-lab-s03-<random>"
 # Lab 4 – containers
 RG4="rg-lab-s03-containers"
 ACR="acrlabs03<random>"   # lowercase letters and digits only, globally unique
+# Lab 5 – monitoring
+RG5="rg-lab-s03-monitor"

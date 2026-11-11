@@ -1,0 +1,28 @@
+{
+  "location": "$LOC",
+  "properties": {
+    "dataSources": {
+      "performanceCounters": [{
+        "name": "perf",
+        "streams": ["Microsoft-Perf"],
+        "samplingFrequencyInSeconds": 60,
+        "counterSpecifiers": [
+          "Processor(*)\\% Processor Time",
+          "Memory(*)\\% Used Memory",
+          "Memory(*)\\Available MBytes Memory",
+          "Logical Disk(*)\\% Used Space"
+        ]
+      }],
+      "syslog": [{
+        "name": "syslog",
+        "streams": ["Microsoft-Syslog"],
+        "facilityNames": ["auth", "authpriv", "daemon", "syslog", "user"],
+        "logLevels": ["Info", "Notice", "Warning", "Error", "Critical", "Alert", "Emergency"]
+      }]
+    },
+    "destinations": {
+      "logAnalytics": [{ "name": "law", "workspaceResourceId": "$LAW_ID" }]
+    },
+    "dataFlows": [{ "streams": ["Microsoft-Perf", "Microsoft-Syslog"], "destinations": ["law"] }]
+  }
+}
