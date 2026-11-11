@@ -11,7 +11,7 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 | 2 | VM Scale Set across 3 zones with autoscale | ✅ Built and tested |
 | 3 | App Service with a staging slot | ✅ Built and tested |
 | 4 | Containers: ACR + ACI | ✅ Built and tested |
-| 5 | Monitoring: Log Analytics, KQL, alerts | To do |
+| 5 | Monitoring: Log Analytics, KQL, alerts | ✅ Built and tested |
 | 6 | Backup and restore of a VM | To do |
 
 ---
@@ -315,4 +315,97 @@ az container create --name aci-monapp --resource-group "$RG4" --location "$LOC" 
 - **No secret anywhere:** the pull uses a managed identity with a read-only role scoped to one registry (same principle as Entra ID auth instead of access keys in S02).
 - **ACI runs each container group in an isolated sandbox** (the hostname is `SandboxHost-...`, not a VM of mine).
 - **`az container exec` cannot pass arguments** to the command: open `/bin/bash`, then type the commands inside.
+
+---
+
+## Lab 5 – Monitoring: Log Analytics, KQL and alerts
+
+### Scenario
+A small Linux VM is monitored end to end: its guest data and the subscription activity log land in a Log Analytics workspace queried with KQL, and two alerts send an email – one on high CPU, one on any deletion in the resource group.
+
+### Architecture
+
+![Lab 5 architecture: a Linux VM with the Azure Monitor Agent sends Perf and Syslog data through a Data Collection Rule to a Log Analytics workspace, the activity log is exported with a diagnostic setting, and a metric alert and an activity log alert notify an action group by email](images/lab5-architecture.png)
+
+### Design decisions
+- **Metrics vs logs:** metrics answer "how much" (numeric time series, automatic, near real time); logs answer "what happened and why" (records with details, stored in a workspace, queried with KQL, billed per GB ingested).
+- **Three log sources:** the **activity log** (control plane: who created, changed or deleted what) is automatic and free for 90 days; **resource logs** (inside a resource) are **not collected by default** and need a **diagnostic setting**, which is **not retroactive**; **guest OS data** of a VM needs the **Azure Monitor Agent** and a **Data Collection Rule**, because Azure only sees a VM from the host.
+- **A deletion is a control plane operation**, so the deletion alert is an **activity log alert** (no workspace needed, free), not a resource log alert.
+- **Action group** defined once and reused by both alerts.
+
+### Build
+
+```bash
+az monitor log-analytics workspace create --resource-group "$RG5" --workspace-name law-lab-s03 \
+  --location "$LOC" --retention-time 30 -o none
+LAW_ID=$(az monitor log-analytics workspace show --resource-group "$RG5" --workspace-name law-lab-s03 --query id -o tsv)
+
+# Activity log -> workspace (subscription-level diagnostic setting: NOT removed with the resource group)
+az monitor diagnostic-settings subscription create --name ds-activity-to-law --location "$LOC" \
+  --workspace "$LAW_ID" --logs '[{"category":"Administrative","enabled":true}]' -o none
+
+# VM: system-assigned identity for the agent, public IP for outbound only, no inbound rule
+az vm create --name vm-mon --resource-group "$RG5" --location "$LOC" --size Standard_B1s --image Ubuntu2404 \
+  --storage-sku StandardSSD_LRS --admin-username azureuser --generate-ssh-keys --assign-identity --nsg-rule NONE -o none
+az vm extension set --name AzureMonitorLinuxAgent --publisher Microsoft.Azure.Monitor \
+  --vm-name vm-mon --resource-group "$RG5" --enable-auto-upgrade true -o none
+
+# Data Collection Rule from a template (no real IDs in Git), then associate it with the VM
+export LOC LAW_ID
+envsubst '$LOC $LAW_ID' < dcr.template.json > dcr.json
+az monitor data-collection rule create --name dcr-vm-mon --resource-group "$RG5" --location "$LOC" --rule-file dcr.json -o none
+az monitor data-collection rule association create --name dcra-vm-mon \
+  --rule-id "$(az monitor data-collection rule show --name dcr-vm-mon --resource-group "$RG5" --query id -o tsv)" \
+  --resource "$(az vm show --name vm-mon --resource-group "$RG5" --query id -o tsv)" -o none
+
+# Alerts (no action group in this lab: alerts are visible in Monitor > Alerts)
+az monitor metrics alert create --name alert-cpu-high --resource-group "$RG5" \
+  --scopes "$(az vm show --name vm-mon --resource-group "$RG5" --query id -o tsv)" \
+  --condition "avg Percentage CPU > 80" --window-size 5m --evaluation-frequency 1m --severity 2 -o none
+az monitor activity-log alert create --name alert-nsg-delete --resource-group "$RG5" \
+  --scope "$(az group show --name "$RG5" --query id -o tsv)" \
+  --condition "category=Administrative and operationName=Microsoft.Network/networkSecurityGroups/delete and status=Succeeded" -o none
+```
+
+DCR template: [`dcr.template.json`](./dcr.template.json) (performance counters CPU / memory / disk every 60 s + Syslog). KQL queries used in this lab: [`kql-queries.md`](./kql-queries.md).
+
+**The agent's identity needs no RBAC role.** The CLI suggested giving the VM identity `Contributor` on the resource group; that would be useless and against least privilege: authorization to send data comes from the VM–DCR association.
+
+### Tests and results
+
+| Test | Expected | Result |
+|---|---|---|
+| Activity log in the workspace | `AzureActivity` rows within ~15 min | ✅ VM, extension and DCR creation listed with `Caller` |
+| Agent alive | `Heartbeat` rows for `vm-mon` | ✅ First beat ~5 min after the DCR association, one per minute |
+| Guest memory | `Perf` "% Used Memory" | ✅ ~39.6 % used, one value per minute |
+| Deletion recorded | `Start`, `Accept`, `Success` for the NSG delete | ✅ 5 s between Start and Success |
+| **Activity log alert** (NSG deleted at 22:56:54) | Alert fired | ✅ Fired at 23:01 (~4 min), severity 4 (default) |
+| **Metric alert** (CPU load from 22:56 with `yes`) | Fired after 5 min above 80 % | ✅ Fired at 23:03 (~7 min), severity 2 |
+
+**Agent heartbeat** and **memory seen from inside the VM**:
+
+![Heartbeat summarized by computer](images/lab5-heartbeat.png)
+
+![Perf table: % Used Memory of vm-mon](images/lab5-perf-memory.png)
+
+**Both alerts fired** (Monitor > Alerts):
+
+![alert-cpu-high and alert-nsg-delete in Fired state](images/lab5-alerts-fired.png)
+
+### Lessons learned
+- **Diagnostic settings are not retroactive:** resource logs that were not collected are lost. Configure them at creation time (in production, enforce with Azure Policy `DeployIfNotExists`).
+- **The activity log diagnostic setting lives at subscription level** and survives the resource group deletion: remove it explicitly at cleanup.
+- **Workspace times are UTC**, and one operation appears as several rows (`Start`, `Accept`, `Success`).
+- **`=~` instead of `==`** for resource names: the activity log stores some of them in upper case.
+- **Metric alerts are stateful** (Fired, then Resolved automatically when the condition clears, one notification each way); **activity log alerts are stateless** (one alert per event, never auto-resolved). The *monitor condition* (Fired/Resolved, set by Azure) is different from the *alert state* (New/Acknowledged/Closed, set by people).
+- **Activity log alerts match one exact operation** (no wildcard). "Any deletion" needs a log search alert with a KQL query on `AzureActivity`.
+- **The Logs blade opens in AI agent mode:** switch it off to write KQL by hand first; the agent is useful once you can read and verify the query it writes.
+
+### Cleanup
+
+```bash
+az monitor diagnostic-settings subscription delete --name ds-activity-to-law --yes
+az monitor diagnostic-settings subscription list --query "value[].name" -o tsv   # expected: empty
+az group delete --name "$RG5" --yes --no-wait
+```
 
