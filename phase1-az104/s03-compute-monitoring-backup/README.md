@@ -12,7 +12,7 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 | 3 | App Service with a staging slot | ✅ Built and tested |
 | 4 | Containers: ACR + ACI | ✅ Built and tested |
 | 5 | Monitoring: Log Analytics, KQL, alerts | ✅ Built and tested |
-| 6 | Backup and restore of a VM | To do |
+| 6 | Backup and restore of a VM | In progress |
 
 ---
 
@@ -412,4 +412,24 @@ az monitor diagnostic-settings subscription delete --name ds-activity-to-law --y
 az monitor diagnostic-settings subscription list --query "value[].name" -o tsv   # expected: empty
 az group delete --name "$RG5" --yes --no-wait
 ```
+
+---
+
+## Lab 6 – Azure Backup: back up a VM and restore the smallest piece
+
+### Scenario
+A Linux VM holds application data. It is protected by a Recovery Services vault with a backup policy. After an accidental deletion of the application folder, only that folder is recovered, without stopping the VM or rolling back the rest of the disk. The vault's protection against an attacker deleting the backups is also tested.
+
+### Architecture
+
+![Lab 6 architecture: a Linux VM is backed up through a snapshot (instant restore) and a transfer to a Recovery Services vault driven by a backup policy; restores can target files, disks or a new VM](images/lab6-architecture.png)
+
+### Design decisions
+- **Redundancy is not a backup:** LRS/ZRS/GRS copy the current state, including deletions, corruption and ransomware encryption. A backup keeps copies of the past.
+- **RPO drives the policy:** with one backup per night, an incident at 10:00 loses the 8 hours since 02:00 (up to ~24 h in the worst case). A lower RPO needs more frequent backups (Enhanced policy).
+- **Restore the smallest piece possible:** a deleted folder means **file recovery** (the recovery point is mounted as a temporary disk, the VM keeps running). Replacing the disks would also roll back 8 hours of legitimate changes elsewhere and requires stopping the VM.
+- **Protect the backups themselves:** soft delete keeps deleted backup data 14 days; immutability blocks deletion before retention ends; **Multi-User Authorization** with a Resource Guard owned by another team enforces separation of duties on destructive operations (plus PIM and MFA on admin accounts).
+- **Vault in the same region as the VM**, LRS redundancy for the lab (GRS + cross region restore in production).
+
+*Build, tests and results: in progress.*
 
