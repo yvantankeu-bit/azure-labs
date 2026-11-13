@@ -12,7 +12,7 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 | 3 | App Service with a staging slot | ✅ Built and tested |
 | 4 | Containers: ACR + ACI | ✅ Built and tested |
 | 5 | Monitoring: Log Analytics, KQL, alerts | ✅ Built and tested |
-| 6 | Backup and restore of a VM | In progress |
+| 6 | Backup and restore of a VM | ✅ Built and tested |
 
 ---
 
@@ -431,5 +431,67 @@ A Linux VM holds application data. It is protected by a Recovery Services vault 
 - **Protect the backups themselves:** soft delete keeps deleted backup data 14 days; immutability blocks deletion before retention ends; **Multi-User Authorization** with a Resource Guard owned by another team enforces separation of duties on destructive operations (plus PIM and MFA on admin accounts).
 - **Vault in the same region as the VM**, LRS redundancy for the lab (GRS + cross region restore in production).
 
-*Build, tests and results: in progress.*
+### Build
+
+```bash
+az vm create --name vm-bkp --resource-group "$RG6" --location "$LOC" --size Standard_B1s --image Ubuntu2404 \
+  --storage-sku StandardSSD_LRS --admin-username azureuser --generate-ssh-keys --nsg-rule NONE -o none
+az vm run-command invoke --name vm-bkp --resource-group "$RG6" --command-id RunShellScript \
+  --scripts 'mkdir -p /opt/app && echo "config v1 - $(date)" > /opt/app/config.txt'   # single quotes: $(date) runs in the VM
+
+az backup vault create --name rsv-lab-s03 --resource-group "$RG6" --location "$LOC" -o none
+az backup vault backup-properties set --name rsv-lab-s03 --resource-group "$RG6" \
+  --backup-storage-redundancy LocallyRedundant -o none        # only changeable before the first backup
+az backup protection enable-for-vm --resource-group "$RG6" --vault-name rsv-lab-s03 --vm vm-bkp --policy-name DefaultPolicy -o none
+az backup protection backup-now --resource-group "$RG6" --vault-name rsv-lab-s03 --container-name vm-bkp --item-name vm-bkp \
+  --backup-management-type AzureIaasVM --retain-until "$(date -d '+7 days' +%d-%m-%Y)" -o none
+```
+
+### Tests and results
+
+| Test | Expected | Result |
+|---|---|---|
+| On-demand backup | Snapshot, transfer to vault, validation | ✅ A restore point was usable as soon as the snapshot finished (instant restore), before the transfer to the vault |
+| Scheduled backup | DefaultPolicy runs on its own | ✅ Second recovery point the next day, without any action |
+| Recovery point consistency | Linux without pre/post scripts | ✅ **File-system consistent** (between crash- and application-consistent) |
+| Incident: `rm -rf /opt/app` | Folder gone | ✅ |
+| **File recovery** of the most recent point before the incident | Only `/opt/app` restored, VM running | ✅ `config.txt` back with its original content and date |
+| **Soft delete**: stop protection + delete backup data | Data kept, not purged | ✅ `ProtectionStopped`, `isScheduledForDeferredDelete: true` |
+| **Undelete** | Both recovery points back | ✅ |
+
+**File recovery** – the recovery point is mounted in the VM and only the deleted folder is copied back:
+
+![config.txt read from the mounted recovery point, copied back to /opt/app and verified](images/lab6-file-recovery.png)
+
+**Soft delete** – the backup data survives the "attacker" deleting it, and comes back with undelete:
+
+![Protection stopped with backup data deleted: soft deleted](images/lab6-soft-deleted.png)
+
+![After undelete: both recovery points are back](images/lab6-undelete.png)
+
+### How the file recovery was done
+1. `az backup restore files mount-rp` failed with `BMSUserErrorInvalidInput` for both recovery points, with short and full container/item names: the **portal** (VM > Backup > File Recovery) generated the script and its password instead.
+2. SSH opened **temporarily, for one source IP only** (NSG rule priority 100, `<my-public-ip>/32`, port 22): a manual just-in-time access.
+3. Script copied with `scp`, run with `sudo python3` in the VM (it installs `open-iscsi`, `lshw` and `pyasyncore`, since `asyncore` was removed from Python 3.12+), password entered, volumes mounted under `~/vm-bkp-<timestamp>/Volume1..4`.
+4. `/opt/app` found in **Volume1** (`sdc1` = the root partition, same layout as `sda1` on the live VM), copied back with `sudo cp -a`.
+5. Closed everything: **Unmount Disks** in the portal, script run with `clean` and deleted, SSH rule deleted, local copies of the script deleted. The script and its password give access to the VM data: they never go to Git.
+
+### Lessons learned
+- **Pick the most recent recovery point before the incident** (smallest RPO); older points stay in the vault, they are not deleted.
+- **Restore the smallest piece:** file recovery kept the VM running and every other change made since the backup.
+- **Globs are expanded by the calling shell, before `sudo`:** the mount folders are readable by root only, so `~/vm-bkp-*/...` stayed literal for `azureuser`. Use the full path (same family of lesson as quoting: who interprets the text, and when).
+- **Every temporary access is closed at the end of the intervention** (recovery point unmounted, SSH rule removed, script deleted).
+- **When a CLI command fails with an opaque error, try the portal:** it often calls the operation differently and explains the failure better.
+- **Soft delete protects backups from deletion**, but an admin can also disable soft delete: that is why immutability and **Multi-User Authorization** matter in production.
+
+### Cleanup
+A vault cannot be deleted while it holds backup data, and soft-deleted data blocks it for 14 days. For the lab, soft delete is disabled first – exactly the action that MUA would block in production.
+
+```bash
+az backup vault backup-properties set --name rsv-lab-s03 --resource-group "$RG6" --soft-delete-feature-state Disable -o none
+az backup protection disable --resource-group "$RG6" --vault-name rsv-lab-s03 --container-name vm-bkp --item-name vm-bkp \
+  --backup-management-type AzureIaasVM --delete-backup-data true --yes -o none
+az backup item list --resource-group "$RG6" --vault-name rsv-lab-s03 -o table   # expected: empty
+az group delete --name "$RG6" --yes --no-wait
+```
 
