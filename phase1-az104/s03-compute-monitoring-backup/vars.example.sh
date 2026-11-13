@@ -8,3 +8,5 @@ RG4="rg-lab-s03-containers"
 ACR="acrlabs03<random>"   # lowercase letters and digits only, globally unique
 # Lab 5 – monitoring
 RG5="rg-lab-s03-monitor"
+# Lab 6 – backup
+RG6="rg-lab-s03-backup"
