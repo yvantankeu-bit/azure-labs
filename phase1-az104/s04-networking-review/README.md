@@ -8,7 +8,7 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 | Lab | Topic | Status |
 |---|---|---|
 | 1 | Hub-and-spoke with VNet peering, non-transitivity | ✅ Built and tested |
-| 2 | NSG rules, priorities, service tags, ASG | ⏳ To do |
+| 2 | NSG on the database subnet: rules, priorities, service tags | ✅ Built and tested |
 | 3 | UDR through a firewall (NVA) | ⏳ To do |
 | 4 | Azure Bastion | ⏳ To do |
 | 5 | Internal Load Balancer with health probe | ⏳ To do |
@@ -62,3 +62,49 @@ The missing line is exactly what a user-defined route (UDR) pointing at the hub 
 
 ### Clean-up
 Resources are kept (VMs deallocated) until the end of S04, then removed with `az group delete -n "$RG" --yes --no-wait`.
+
+---
+
+## Lab 2 – Restricting access to the database subnet with an NSG
+
+### Scenario
+Only the application may reach the database port. By default, everything in a VNet, including peered VNets, can reach everything else, so the hub could open an SSH session on the database VM.
+
+### Architecture
+
+![Lab 2 architecture: nsg-data associated with snet-data in vnet-spoke2, allowing TCP 3306 from the hub subnet and denying other VirtualNetwork traffic](images/lab2-architecture.png)
+
+Built with the lab 2 section of [`deploy.sh`](./deploy.sh). Spoke 1 has no route to spoke 2 yet (UDR in lab 3), so `vm-hub` plays the application: rule 100 uses the hub subnet `10.0.1.0/24` and will point to the real application subnet `10.1.1.0/24` once lab 3 is done.
+
+### Design decisions
+
+**Rules, in order.** Priority 100 allows TCP 3306 from the application subnet. Priority 4000 denies all traffic from the `VirtualNetwork` service tag. The `Allow` has the smaller number, so it is read first; a `Deny` with a smaller number would hide it.
+
+**Why the explicit Deny is needed.** The default rule `AllowVNetInBound` (65000) allows the `VirtualNetwork` tag, which includes the VNet itself, **peered VNets** and on-premises networks connected through a gateway. Without rule 4000, everything in the hub, and later on-premises, would reach the database.
+
+**Associated with the subnet, not the NIC.** For inbound traffic Azure reads the subnet NSG first, then the NIC NSG, and both must allow. Microsoft recommends one level only, to avoid conflicting rules that are hard to troubleshoot. An NSG that is not associated filters nothing.
+
+**Source by address range, not by ASG.** An application security group can only contain NICs from one VNet, and a rule with an ASG as source and another as destination requires both in the same VNet. The application (spoke 1) and the database (spoke 2) are in different VNets, so the source is a CIDR range.
+
+### Results (from `vm-hub` to `vm-spoke2`)
+
+| State | TCP 22 | TCP 3306 |
+|---|---|---|
+| No NSG | succeeded | succeeded |
+| `nsg-data` created, not associated | succeeded | succeeded |
+| `nsg-data` associated with `snet-data` | timed out | succeeded |
+
+A timeout means the packet was dropped on the way (NSG or missing route). `Connection refused` would mean it reached the VM and nothing listens on that port.
+
+Effective rules of the database NIC, in reading order:
+
+```text
+Prio    Name                          Access   Src
+100     allow-3306-from-hub           Allow    10.0.1.0/24
+4000    deny-vnet-inbound             Deny     VirtualNetwork
+65000   AllowVnetInBound              Allow    VirtualNetwork
+65001   AllowAzureLoadBalancerInBound Allow    AzureLoadBalancer
+65500   DenyAllInBound                Deny     0.0.0.0/0
+```
+
+Traffic from the hub on port 22 stops at rule 4000; rule 65000 is never read for it.

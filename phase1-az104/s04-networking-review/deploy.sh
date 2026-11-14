@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# S04 – Lab 1 : hub-and-spoke avec VNet peering (hub + 2 spokes, 3 VMs sans public IP)
+# S04 – Labs 1 et 2 : hub-and-spoke puis NSG avec VNet peering (hub + 2 spokes, 3 VMs sans public IP)
 # Usage : depuis le dossier s04, après cp vars.example.sh vars.sh
 set -euo pipefail
 source ./vars.sh
@@ -48,4 +48,30 @@ az vm run-command invoke -g "$RG" -n vm-spoke1 --command-id RunShellScript \
 # --- 5. Preuve : les routes réellement appliquées à vm-spoke1 ---
 az network nic show-effective-route-table -g "$RG" -n vm-spoke1VMNic -o table
 
-# --- 6. Nettoyage (fin de S04) : az group delete -n "$RG" --yes --no-wait ---
+# =====================  LAB 2 : NSG sur le subnet de la base  =====================
+# --- 7. Mini service sur le port 3306 de vm-spoke2 + état de départ (sans NSG) ---
+az vm run-command invoke -g "$RG" -n vm-spoke2 --command-id RunShellScript \
+  --scripts "setsid nohup python3 -m http.server 3306 >/dev/null 2>&1 &" -o none
+az vm run-command invoke -g "$RG" -n vm-hub --command-id RunShellScript \
+  --scripts "nc -zv -w 3 10.3.1.4 22; nc -zv -w 3 10.3.1.4 3306" --query "value[0].message" -o tsv
+
+# --- 8. NSG et règles (créé mais pas encore associé : il ne filtre rien) ---
+az network nsg create -g "$RG" -l "$LOC" -n nsg-data --tags $TAGS -o none
+az network nsg rule create -g "$RG" --nsg-name nsg-data -n allow-3306-from-hub \
+  --priority 100 --direction Inbound --access Allow --protocol Tcp \
+  --source-address-prefixes 10.0.1.0/24 --destination-port-ranges 3306 -o none
+az network nsg rule create -g "$RG" --nsg-name nsg-data -n deny-vnet-inbound \
+  --priority 4000 --direction Inbound --access Deny --protocol '*' \
+  --source-address-prefixes VirtualNetwork --destination-port-ranges '*' -o none
+
+# --- 9. Association au subnet, puis mêmes tests : 3306 passe, 22 expire ---
+az network vnet subnet update -g "$RG" --vnet-name vnet-spoke2 -n snet-data \
+  --network-security-group nsg-data -o none
+az vm run-command invoke -g "$RG" -n vm-hub --command-id RunShellScript \
+  --scripts "nc -zv -w 3 10.3.1.4 22; nc -zv -w 3 10.3.1.4 3306" --query "value[0].message" -o tsv
+
+# --- 10. Preuve : règles effectives de la NIC de vm-spoke2 ---
+az network nic list-effective-nsg -g "$RG" -n vm-spoke2VMNic \
+  --query "value[0].effectiveSecurityRules[?direction=='Inbound'].{prio:priority, name:name, access:access, src:sourceAddressPrefix}" -o table
+
+# --- 11. Nettoyage (fin de S04) : az group delete -n "$RG" --yes --no-wait ---
