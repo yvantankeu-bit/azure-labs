@@ -120,7 +120,7 @@ az network nic show-effective-route-table -g "$RG" -n vm-spoke1VMNic -o table | 
 az vm run-command invoke -g "$RG" -n vm-spoke1 --command-id RunShellScript \
   --scripts "nc -zv -w 3 10.3.1.4 3306" --query "value[0].message" -o tsv
 
-# --- 18. La regle 100 autorise maintenant la vraie source (spoke 1), plus le hub ---
+# --- 18. La regle 100 autorise maintenant la vraie source (spoke 1) et non plus le hub ---
 az network nsg rule update -g "$RG" --nsg-name nsg-data -n allow-3306-from-hub \
   --source-address-prefixes 10.1.1.0/24 -o none
 az vm run-command invoke -g "$RG" -n vm-spoke1 --command-id RunShellScript \
