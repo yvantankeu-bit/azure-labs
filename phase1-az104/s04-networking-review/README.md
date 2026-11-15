@@ -108,3 +108,7 @@ Prio    Name                          Access   Src
 ```
 
 Traffic from the hub on port 22 stops at rule 4000; rule 65000 is never read for it.
+
+### Lab 2b – Proving the ASG constraint
+
+Two application security groups were created, `asg-app` (NIC of `vm-spoke1`) and `asg-db` (NIC of `vm-spoke2`), and a rule using them as source and destination was attempted in `nsg-data`. Azure refused it with the error code `AllApplicationSecurityGroupsInSecurityRuleMustBeFromSameVnet`: all ASGs of a security rule must belong to the same virtual network. Between spokes, the source is therefore designated by address range (`10.1.1.0/24`). ASGs remain the right tool for several tiers inside one VNet, where rules can name roles instead of IP addresses.

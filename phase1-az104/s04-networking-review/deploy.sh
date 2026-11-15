@@ -74,4 +74,15 @@ az vm run-command invoke -g "$RG" -n vm-hub --command-id RunShellScript \
 az network nic list-effective-nsg -g "$RG" -n vm-spoke2VMNic \
   --query "value[0].effectiveSecurityRules[?direction=='Inbound'].{prio:priority, name:name, access:access, src:sourceAddressPrefix}" -o table
 
+# --- 10b. Lab 2b : ASG entre deux VNets = refusé (AllApplicationSecurityGroupsInSecurityRuleMustBeFromSameVnet) ---
+az network asg create -g "$RG" -l "$LOC" -n asg-app -o none
+az network asg create -g "$RG" -l "$LOC" -n asg-db -o none
+az network nic ip-config update -g "$RG" --nic-name vm-spoke1VMNic -n ipconfigvm-spoke1 \
+  --application-security-groups asg-app -o none
+az network nic ip-config update -g "$RG" --nic-name vm-spoke2VMNic -n ipconfigvm-spoke2 \
+  --application-security-groups asg-db -o none
+az network nsg rule create -g "$RG" --nsg-name nsg-data -n test-asg-cross-vnet \
+  --priority 200 --direction Inbound --access Allow --protocol Tcp \
+  --source-asgs asg-app --destination-asgs asg-db --destination-port-ranges 3306 || echo "Refus attendu"
+
 # --- 11. Nettoyage (fin de S04) : az group delete -n "$RG" --yes --no-wait ---
