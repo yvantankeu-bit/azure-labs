@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# S04 – Labs 1 et 2 : hub-and-spoke puis NSG avec VNet peering (hub + 2 spokes, 3 VMs sans public IP)
+# S04 – Labs 1 à 3 : hub-and-spoke, NSG, UDR via NVA avec VNet peering (hub + 2 spokes, 3 VMs sans public IP)
 # Usage : depuis le dossier s04, après cp vars.example.sh vars.sh
 set -euo pipefail
 source ./vars.sh
@@ -84,5 +84,54 @@ az network nic ip-config update -g "$RG" --nic-name vm-spoke2VMNic -n ipconfigvm
 az network nsg rule create -g "$RG" --nsg-name nsg-data -n test-asg-cross-vnet \
   --priority 200 --direction Inbound --access Allow --protocol Tcp \
   --source-asgs asg-app --destination-asgs asg-db --destination-port-ranges 3306 || echo "Refus attendu"
+
+# =====================  LAB 3 : UDR via une NVA (vm-hub)  =====================
+# --- 12. Etat de depart : spoke1 -> spoke2 expire (10.0.0.0/8 -> None) ---
+az vm run-command invoke -g "$RG" -n vm-spoke1 --command-id RunShellScript \
+  --scripts "nc -zv -w 3 10.3.1.4 3306" --query "value[0].message" -o tsv
+
+# --- 13. Serveur avec journal sur vm-spoke2 (pour lire l'IP source vue) ---
+az vm run-command invoke -g "$RG" -n vm-spoke2 --command-id RunShellScript \
+  --scripts "pkill -f 'http.server 3306'; setsid nohup python3 -m http.server 3306 >/tmp/srv.log 2>&1 &" -o none
+
+# --- 14. Deux verrous de l'appliance : Azure (NIC) puis Linux ---
+az network nic update -g "$RG" -n vm-hubVMNic --ip-forwarding true -o none
+az vm run-command invoke -g "$RG" -n vm-hub --command-id RunShellScript \
+  --scripts "sysctl -w net.ipv4.ip_forward=1; echo net.ipv4.ip_forward=1 > /etc/sysctl.d/99-forward.conf" -o none
+
+# --- 15. Trafic relaye autorise sur les 4 peerings ---
+az network vnet peering update -g "$RG" --vnet-name vnet-hub    -n hub-to-spoke1 --set allowForwardedTraffic=true -o none
+az network vnet peering update -g "$RG" --vnet-name vnet-spoke1 -n spoke1-to-hub --set allowForwardedTraffic=true -o none
+az network vnet peering update -g "$RG" --vnet-name vnet-hub    -n hub-to-spoke2 --set allowForwardedTraffic=true -o none
+az network vnet peering update -g "$RG" --vnet-name vnet-spoke2 -n spoke2-to-hub --set allowForwardedTraffic=true -o none
+
+# --- 16. UDR aller (spoke1) et retour (spoke2) vers la NVA ---
+az network route-table create -g "$RG" -n rt-spoke1 -l "$LOC" -o none
+az network route-table route create -g "$RG" --route-table-name rt-spoke1 -n to-spoke2 \
+  --address-prefix 10.3.0.0/16 --next-hop-type VirtualAppliance --next-hop-ip-address 10.0.1.4 -o none
+az network vnet subnet update -g "$RG" --vnet-name vnet-spoke1 -n snet-app --route-table rt-spoke1 -o none
+az network route-table create -g "$RG" -n rt-spoke2 -l "$LOC" -o none
+az network route-table route create -g "$RG" --route-table-name rt-spoke2 -n to-spoke1 \
+  --address-prefix 10.1.0.0/16 --next-hop-type VirtualAppliance --next-hop-ip-address 10.0.1.4 -o none
+az network vnet subnet update -g "$RG" --vnet-name vnet-spoke2 -n snet-data --route-table rt-spoke2 -o none
+az network nic show-effective-route-table -g "$RG" -n vm-spoke1VMNic -o table | grep -E "User|Source"
+
+# --- 17. Le routage passe mais le NSG jette encore (source 10.1.1.4 non autorisee) : timeout ---
+az vm run-command invoke -g "$RG" -n vm-spoke1 --command-id RunShellScript \
+  --scripts "nc -zv -w 3 10.3.1.4 3306" --query "value[0].message" -o tsv
+
+# --- 18. La regle 100 autorise maintenant la vraie source (spoke 1), plus le hub ---
+az network nsg rule update -g "$RG" --nsg-name nsg-data -n allow-3306-from-hub \
+  --source-address-prefixes 10.1.1.0/24 -o none
+az vm run-command invoke -g "$RG" -n vm-spoke1 --command-id RunShellScript \
+  --scripts "nc -zv -w 3 10.3.1.4 3306" --query "value[0].message" -o tsv   # attendu : succeeded
+az vm run-command invoke -g "$RG" -n vm-hub --command-id RunShellScript \
+  --scripts "nc -zv -w 3 10.3.1.4 3306" --query "value[0].message" -o tsv   # attendu : timeout
+
+# --- 19. Preuve : l'IP source vue par vm-spoke2 est celle de vm-spoke1 (pas de NAT) ---
+az vm run-command invoke -g "$RG" -n vm-spoke1 --command-id RunShellScript \
+  --scripts "curl -s -m 5 -o /dev/null http://10.3.1.4:3306/" -o none
+az vm run-command invoke -g "$RG" -n vm-spoke2 --command-id RunShellScript \
+  --scripts "cat /tmp/srv.log" --query "value[0].message" -o tsv
 
 # --- 11. Nettoyage (fin de S04) : az group delete -n "$RG" --yes --no-wait ---

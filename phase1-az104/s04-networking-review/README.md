@@ -9,7 +9,7 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 |---|---|---|
 | 1 | Hub-and-spoke with VNet peering, non-transitivity | ✅ Built and tested |
 | 2 | NSG on the database subnet: rules, priorities, service tags | ✅ Built and tested |
-| 3 | UDR through a firewall (NVA) | ⏳ To do |
+| 3 | UDR through a firewall (NVA) | ✅ Built and tested |
 | 4 | Azure Bastion | ⏳ To do |
 | 5 | Internal Load Balancer with health probe | ⏳ To do |
 
@@ -112,3 +112,57 @@ Traffic from the hub on port 22 stops at rule 4000; rule 65000 is never read for
 ### Lab 2b – Proving the ASG constraint
 
 Two application security groups were created, `asg-app` (NIC of `vm-spoke1`) and `asg-db` (NIC of `vm-spoke2`), and a rule using them as source and destination was attempted in `nsg-data`. Azure refused it with the error code `AllApplicationSecurityGroupsInSecurityRuleMustBeFromSameVnet`: all ASGs of a security rule must belong to the same virtual network. Between spokes, the source is therefore designated by address range (`10.1.1.0/24`). ASGs remain the right tool for several tiers inside one VNet, where rules can name roles instead of IP addresses.
+
+---
+
+## Lab 3 – UDR through a network virtual appliance (NVA)
+
+### Scenario
+Spoke 1 (application) must reach the database in spoke 2, but the two spokes are not peered and peering is not transitive. Instead of peering them, all spoke-to-spoke traffic goes through an appliance in the hub, which is where a firewall would sit. To avoid the cost of Azure Firewall, `vm-hub` plays the NVA as a plain Linux router.
+
+### Architecture
+
+![Lab 3 architecture: user-defined routes in both spokes send spoke-to-spoke traffic to the NVA 10.0.1.4 in the hub; nsg-data now allows the spoke 1 subnet](images/lab3-architecture.png)
+
+Built with the lab 3 section of [`deploy.sh`](./deploy.sh).
+
+### Design decisions
+
+**Routing decides where the packet goes, the NSG decides if it may enter.** Without a route, spoke 1 sends `10.3.0.0/16` traffic to the system route `10.0.0.0/8 → None` and the packet is dropped before anything else is evaluated.
+
+**User-defined routes, in both directions.** `rt-spoke1` sends `10.3.0.0/16` to the appliance `10.0.1.4` (next hop type `VirtualAppliance`). The same logic applies to the return path: `rt-spoke2` sends `10.1.0.0/16` to the appliance, otherwise the reply would not follow the same path. A `/16` route beats the system `/8` by longest prefix match.
+
+**Two locks on the appliance.** Relaying packets that are not addressed to it needs *IP forwarding* enabled on the NIC in Azure **and** `net.ipv4.ip_forward=1` in Linux (persisted in `/etc/sysctl.d/`). Either one missing and the packets die at the appliance.
+
+**Forwarded traffic allowed on the four peering links.** *Allow forwarded traffic* is off by default; it lets a peered VNet accept packets whose source is not in the peered VNet itself.
+
+**The NSG sees the real source.** A plain Linux router does not translate addresses, so the database NSG sees `10.1.1.4`, not the appliance. Rule 100 therefore had to change from the hub subnet to the application subnet `10.1.1.0/24`. A firewall that does NAT would show its own address instead.
+
+**The appliance sits in its own subnet** (`snet-shared`), different from the subnets it routes for, to avoid routing loops.
+
+### Results (TCP 3306 to `vm-spoke2`)
+
+| Step | From | Result | Layer that decided |
+|---|---|---|---|
+| Baseline, no UDR | `vm-spoke1` | timed out | Routing (`10.0.0.0/8 → None`) |
+| Forwarding on, peerings set, UDR in place, rule 100 still on the hub subnet | `vm-spoke1` | timed out | NSG (rule 4000, source `10.1.1.4`) |
+| Rule 100 source changed to `10.1.1.0/24` | `vm-spoke1` | succeeded | NSG (rule 100) |
+| Same rule | `vm-hub` | timed out | NSG (rule 4000, source `10.0.1.4`) |
+
+Two timeouts, two different causes: the symptom alone does not tell which layer dropped the packet.
+
+Effective route of `vm-spoke1`, the user-defined route taking precedence over the system `/8`:
+
+```text
+Source   State   Address Prefix   Next Hop Type     Next Hop IP
+User     Active  10.3.0.0/16      VirtualAppliance  10.0.1.4
+```
+
+Proof that no NAT happens: the access log of the test server on `vm-spoke2` shows the application's own address as the client.
+
+```text
+10.1.1.4 - - [..] "GET / HTTP/1.1" 200 -
+```
+
+### Clean-up
+VMs are deallocated between sessions (VNets, peerings and route tables are free). The whole resource group is deleted at the end of S04.
