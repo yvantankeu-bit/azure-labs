@@ -174,6 +174,12 @@ VMs are deallocated between sessions (VNets, peerings and route tables are free)
 ### Scenario
 The VMs have no public IP, so nothing reaches them from the Internet. Bastion gives browser-based SSH over HTTPS, and reaches the VMs through their private IPs. It is billed per hour from deployment, so it was created, tested and deleted in the same session.
 
+### Architecture
+
+![Lab 4 architecture: Bastion Basic in AzureBastionSubnet 10.0.2.0/26 of vnet-hub, reaching vm-spoke1 and vm-spoke2 through the peerings, with nsg-data rule 300 allowing SSH from the Bastion subnet](images/lab4-architecture.png)
+
+Built with the lab 4 section of [`deploy.sh`](./deploy.sh).
+
 ### Design decisions
 
 **SKU Basic, not Developer.** Developer is free but uses shared infrastructure, connects to one VM at a time and **does not support virtual network peering**. Bastion sits in the hub and the targets are in the spokes, so Developer cannot work here. Basic reaches VMs in peered VNets. What Basic lacks (custom port, shareable link, file transfer, native client through `az`) is not needed for this lab.
