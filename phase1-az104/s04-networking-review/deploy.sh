@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# S04 – Labs 1 à 4 : hub-and-spoke, NSG, UDR via NVA, Bastion avec VNet peering (hub + 2 spokes, 3 VMs sans public IP)
+# S04 – Labs 1 à 5 : hub-and-spoke, NSG, UDR via NVA, Bastion, Load Balancer interne avec VNet peering (hub + 2 spokes, 3 VMs sans public IP)
 # Usage : depuis le dossier s04, après cp vars.example.sh vars.sh
 set -euo pipefail
 source ./vars.sh
@@ -155,5 +155,52 @@ az network bastion create -g "$RG" -n bas-hub -l "$LOC" \
 # --- 23. Nettoyage du lab 4 : Bastion d'abord, puis l'IP publique (facturee tant qu'elle existe) ---
 az network bastion delete -g "$RG" -n bas-hub
 az network public-ip delete -g "$RG" -n pip-bastion
+
+# =====================  LAB 5 : Load Balancer interne + sonde de sante  =====================
+# --- 24. 2e VM web dans snet-data + un serveur web par VM (la page indique quelle VM repond) ---
+az vm create -g "$RG" -n vm-web2 --image Ubuntu2204 --size Standard_B1s \
+  --vnet-name vnet-spoke2 --subnet snet-data --public-ip-address "" --nsg "" \
+  --admin-username azureuser --generate-ssh-keys --tags $TAGS -o none
+for vm in vm-spoke2 vm-web2; do
+  az vm run-command invoke -g "$RG" -n "$vm" --command-id RunShellScript \
+    --scripts "mkdir -p /srv/www && echo 'reponse de $vm' > /srv/www/index.html && cd /srv/www && setsid nohup python3 -m http.server 80 >/tmp/web.log 2>&1 &" -o none
+done
+
+# --- 25. Load Balancer interne Standard : frontend prive, pool, sonde TCP 80, regle, membres ---
+az network lb create -g "$RG" -n ilb-data -l "$LOC" --sku Standard \
+  --vnet-name vnet-spoke2 --subnet snet-data \
+  --frontend-ip-name fe-data --private-ip-address 10.3.1.100 --backend-pool-name be-web -o none
+az network lb probe create -g "$RG" --lb-name ilb-data -n probe-80 --protocol Tcp --port 80 --interval 5 -o none
+az network lb probe update -g "$RG" --lb-name ilb-data -n probe-80 --probe-threshold 2 -o none   # --threshold (numberOfProbes) est ignore
+az network lb rule create -g "$RG" --lb-name ilb-data -n rule-80 --protocol Tcp \
+  --frontend-port 80 --backend-port 80 --frontend-ip-name fe-data --backend-pool-name be-web --probe-name probe-80 -o none
+az network nic ip-config address-pool add -g "$RG" --nic-name vm-spoke2VMNic --ip-config-name ipconfigvm-spoke2 --lb-name ilb-data --address-pool be-web -o none
+az network nic ip-config address-pool add -g "$RG" --nic-name vm-web2VMNic   --ip-config-name ipconfigvm-web2   --lb-name ilb-data --address-pool be-web -o none
+
+# --- 26. Etat de depart : timeout (nsg-data : Deny 4000 sur VirtualNetwork bloque client ET sonde) ---
+az vm run-command invoke -g "$RG" -n vm-hub --command-id RunShellScript \
+  --scripts "curl -s -m 5 -o /dev/null -w 'code=%{http_code}\n' http://10.3.1.100/" --query "value[0].message" -o tsv
+
+# --- 27. Regle pour le client seulement : toujours un echec (la sonde est bloquee, 0 VM saine) ---
+az network nsg rule create -g "$RG" --nsg-name nsg-data -n allow-80-from-hub \
+  --priority 200 --direction Inbound --access Allow --protocol Tcp \
+  --source-address-prefixes 10.0.1.0/24 --destination-port-ranges 80 -o none
+
+# --- 28. Regle pour la sonde (tag AzureLoadBalancer = 168.63.129.16), avant le Deny 4000 ---
+az network nsg rule create -g "$RG" --nsg-name nsg-data -n allow-lb-probe \
+  --priority 250 --direction Inbound --access Allow --protocol Tcp \
+  --source-address-prefixes AzureLoadBalancer --destination-port-ranges 80 -o none
+sleep 15
+az vm run-command invoke -g "$RG" -n vm-hub --command-id RunShellScript \
+  --scripts 'for i in $(seq 1 60); do curl -s -m 3 http://10.3.1.100/; done | sort | uniq -c' --query "value[0].message" -o tsv
+
+# --- 29. Panne : arret du serveur de vm-web2, mesure de la fenetre de detection (~13 s) ---
+az vm run-command invoke -g "$RG" -n vm-hub --command-id RunShellScript \
+  --scripts 'for i in $(seq 1 30); do echo "$(date +%T) $(curl -s -m 2 http://10.3.1.100/ || echo ECHEC)"; sleep 1; done' \
+  --query "value[0].message" -o tsv > /tmp/serie.txt &
+sleep 5
+az vm run-command invoke -g "$RG" -n vm-web2 --command-id RunShellScript \
+  --scripts "pkill -f 'http.server 80'; date +%T" --query "value[0].message" -o tsv
+wait; cat /tmp/serie.txt
 
 # --- 11. Nettoyage (fin de S04) : az group delete -n "$RG" --yes --no-wait ---

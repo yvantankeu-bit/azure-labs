@@ -11,7 +11,7 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 | 2 | NSG on the database subnet: rules, priorities, service tags | ✅ Built and tested |
 | 3 | UDR through a firewall (NVA) | ✅ Built and tested |
 | 4 | Azure Bastion (Basic), created then deleted | ✅ Built and tested |
-| 5 | Internal Load Balancer with health probe | ⏳ To do |
+| 5 | Internal Load Balancer with health probe | ✅ Built and tested |
 
 ---
 
@@ -199,3 +199,51 @@ Built with the lab 4 section of [`deploy.sh`](./deploy.sh).
 
 ### Clean-up
 Bastion and its public IP were deleted right after the test (the public IP is billed as long as it exists). The subnet and rule 300 are free and kept.
+
+---
+
+## Lab 5 – Internal Load Balancer with a health probe
+
+### Scenario
+Two web VMs in the database subnet of spoke 2 sit behind a **Standard internal load balancer**. Clients call one private address and never need to know which VM answers. The client is `vm-hub`, reaching the frontend through the peering.
+
+### Architecture
+
+![Lab 5 architecture: vm-hub calls the internal load balancer frontend 10.3.1.100 in snet-data of vnet-spoke2; the backend pool holds vm-spoke2 and vm-web2; the health probe comes from 168.63.129.16](images/lab5-architecture.png)
+
+Built with the lab 5 section of [`deploy.sh`](./deploy.sh).
+
+### Design decisions
+
+**Internal frontend.** The frontend is a private address (`10.3.1.100`) in the subnet, so it is reachable from the VNet, peered VNets and on-premises networks, never from the Internet. Pool members must be in the same VNet. Each VM serves a page naming itself, so the answering VM is visible.
+
+**Health probe.** TCP on port 80 every 5 seconds, `probeThreshold` 2. A VM that fails the probe is removed from rotation. `--threshold` (`numberOfProbes`) is ignored by Azure, which warns about it; `probeThreshold` is the property that counts.
+
+**Standard is closed by default, and the NSG sees two kinds of traffic.**
+- Client traffic comes from `10.0.1.4`; rule 200 allows TCP 80 from the hub subnet.
+- Probe traffic comes from `168.63.129.16`, which the `AzureLoadBalancer` tag stands for. The default rule 65001 would allow it, but the `VirtualNetwork` tag also includes the virtual IP address of the host, so the Deny 4000 matches first and the probe fails. Rule 250 allows the `AzureLoadBalancer` tag on port 80, before the Deny.
+
+### Results
+
+| State of `nsg-data` | Client request to `10.3.1.100` | Why |
+|---|---|---|
+| Rules 100, 300, 4000 only | timed out | Deny 4000 drops the client and the probe |
+| + rule 200 (client) | timed out | Probe still blocked: both VMs unhealthy, 0 backend left |
+| + rule 250 (probe) | answered | Both VMs healthy |
+
+Distribution over 60 requests: 28 `vm-spoke2`, 32 `vm-web2`. The source port changes with each connection, so the 5-tuple hash splits connections irregularly; it is not a round robin.
+
+Failure of one VM (web server on `vm-web2` stopped at 04:31:05):
+
+```text
+04:31:05  last answer from vm-web2
+04:31:06 → 04:31:18  failures (13 s), one per second
+04:31:19  every request answered by vm-spoke2
+```
+
+The window of about 13 seconds is the detection time: two failed probes, 5 seconds apart, plus the wait for the next probe. During it the load balancer still considers the VM healthy. The failures came back instantly instead of after the 2 second client timeout: the packet reached the VM and nothing listened on the port (`connection refused`), unlike a timeout, where a packet is dropped on the way.
+
+A first 10-request test went entirely to `vm-web2` although the health metric (`DipAvailability`) showed both VMs at 100: with so few requests the hash proved uneven, which the 60-request test corrected.
+
+### Clean-up
+Cost is mostly the VMs and the Standard load balancer, which is billed per hour; the whole resource group is deleted at the end of S04.
