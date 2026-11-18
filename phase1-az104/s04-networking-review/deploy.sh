@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# S04 – Labs 1 à 3 : hub-and-spoke, NSG, UDR via NVA avec VNet peering (hub + 2 spokes, 3 VMs sans public IP)
+# S04 – Labs 1 à 4 : hub-and-spoke, NSG, UDR via NVA, Bastion avec VNet peering (hub + 2 spokes, 3 VMs sans public IP)
 # Usage : depuis le dossier s04, après cp vars.example.sh vars.sh
 set -euo pipefail
 source ./vars.sh
@@ -133,5 +133,27 @@ az vm run-command invoke -g "$RG" -n vm-spoke1 --command-id RunShellScript \
   --scripts "curl -s -m 5 -o /dev/null http://10.3.1.4:3306/" -o none
 az vm run-command invoke -g "$RG" -n vm-spoke2 --command-id RunShellScript \
   --scripts "cat /tmp/srv.log" --query "value[0].message" -o tsv
+
+# =====================  LAB 4 : Azure Bastion (Basic) dans le hub  =====================
+# --- 20. Subnet dedie (nom impose, /26 minimum) et IP publique Standard Static ---
+az network vnet subnet create -g "$RG" --vnet-name vnet-hub -n AzureBastionSubnet \
+  --address-prefixes 10.0.2.0/26 -o none
+az network public-ip create -g "$RG" -n pip-bastion -l "$LOC" --sku Standard --allocation-method Static -o none
+
+# --- 21. Le NSG de la base bloquerait Bastion (source 10.0.2.x dans VirtualNetwork -> regle 4000) : on l'autorise ---
+az network nsg rule create -g "$RG" --nsg-name nsg-data -n allow-ssh-from-bastion \
+  --priority 300 --direction Inbound --access Allow --protocol Tcp \
+  --source-address-prefixes 10.0.2.0/26 --destination-port-ranges 22 -o none
+
+# --- 22. Bastion Basic (facture a l'heure des le deploiement, ~10 min) ---
+az vm start -g "$RG" -n vm-spoke1 -o none
+az vm start -g "$RG" -n vm-spoke2 -o none
+az network bastion create -g "$RG" -n bas-hub -l "$LOC" \
+  --vnet-name vnet-hub --public-ip-address pip-bastion --sku Basic
+# Connexion : portail > VM > Connect > Bastion > "Private Key from Local File" (utilisateur azureuser)
+
+# --- 23. Nettoyage du lab 4 : Bastion d'abord, puis l'IP publique (facturee tant qu'elle existe) ---
+az network bastion delete -g "$RG" -n bas-hub
+az network public-ip delete -g "$RG" -n pip-bastion
 
 # --- 11. Nettoyage (fin de S04) : az group delete -n "$RG" --yes --no-wait ---

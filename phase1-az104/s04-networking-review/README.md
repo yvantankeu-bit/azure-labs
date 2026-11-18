@@ -10,7 +10,7 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 | 1 | Hub-and-spoke with VNet peering, non-transitivity | ✅ Built and tested |
 | 2 | NSG on the database subnet: rules, priorities, service tags | ✅ Built and tested |
 | 3 | UDR through a firewall (NVA) | ✅ Built and tested |
-| 4 | Azure Bastion | ⏳ To do |
+| 4 | Azure Bastion (Basic), created then deleted | ✅ Built and tested |
 | 5 | Internal Load Balancer with health probe | ⏳ To do |
 
 ---
@@ -166,3 +166,30 @@ Proof that no NAT happens: the access log of the test server on `vm-spoke2` show
 
 ### Clean-up
 VMs are deallocated between sessions (VNets, peerings and route tables are free). The whole resource group is deleted at the end of S04.
+
+---
+
+## Lab 4 – Azure Bastion
+
+### Scenario
+The VMs have no public IP, so nothing reaches them from the Internet. Bastion gives browser-based SSH over HTTPS, and reaches the VMs through their private IPs. It is billed per hour from deployment, so it was created, tested and deleted in the same session.
+
+### Design decisions
+
+**SKU Basic, not Developer.** Developer is free but uses shared infrastructure, connects to one VM at a time and **does not support virtual network peering**. Bastion sits in the hub and the targets are in the spokes, so Developer cannot work here. Basic reaches VMs in peered VNets. What Basic lacks (custom port, shareable link, file transfer, native client through `az`) is not needed for this lab.
+
+**Dedicated subnet.** It must be named exactly `AzureBastionSubnet`, be /26 or larger, and contain no other resource. `snet-shared` could not be reused: it holds the NVA, and renaming it would break the lab 3 routing. The new subnet is `10.0.2.0/26`, with a Standard, Static public IP.
+
+**The database NSG had to be opened for Bastion.** The Bastion source (`10.0.2.0/26`) belongs to the `VirtualNetwork` tag through the peering, so `deny-vnet-inbound` (4000) would block SSH to the database VM. Rule 300 allows TCP 22 from `10.0.2.0/26` only, and sits between rule 100 and the Deny so it is read first. `vm-spoke1` has no NSG, so nothing filters it.
+
+**Key authentication.** The VMs were created with SSH keys and no password, so the connection uses *Private Key from Local File* with the admin user.
+
+### Results
+
+| Target | Routing | NSG | Bastion session |
+|---|---|---|---|
+| `vm-spoke1` | OK (peering route to the hub range) | None | Connected |
+| `vm-spoke2` | OK | Rule 300 allows, before Deny 4000 | Connected |
+
+### Clean-up
+Bastion and its public IP were deleted right after the test (the public IP is billed as long as it exists). The subnet and rule 300 are free and kept.
