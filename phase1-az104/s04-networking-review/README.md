@@ -13,6 +13,10 @@ Everything is built with **Azure CLI** from WSL (Ubuntu).
 | 4 | Azure Bastion (Basic), created then deleted | ✅ Built and tested |
 | 5 | Internal Load Balancer with health probe | ✅ Built and tested |
 
+## Global network diagram
+
+![Global network diagram of S04: hub with the NVA and Bastion, two spokes, peerings with forwarded traffic, UDRs through the NVA, nsg-data rules and the internal load balancer](images/network-diagram.png)
+
 ---
 
 ## Lab 1 – Hub-and-spoke with VNet peering
